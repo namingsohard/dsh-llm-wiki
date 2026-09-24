@@ -1,92 +1,70 @@
-# dsh-llm-wiki — DSH-Wiki: Agent Semantic Memory Plugin
+# DSH-Wiki — Agent Semantic Memory for DeepSeek Harness
 
-English | [简体中文](README.zh-CN.md)
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-DSH-Wiki gives a [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) agent a **long-term semantic memory**: a file-based Markdown wiki where knowledge gained from web searches, document reading, and task work is distilled once and reused across every future session.
+DSH-Wiki gives a [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) agent **long-term semantic memory**: a file-based Markdown wiki where knowledge gained from web searches, document reading, and task work is distilled once and reused across every future session.
 
 ```
 Search → Understand → Abstract → Store → Reuse → Update
 ```
 
-## Why
+The design follows Andrej Karpathy's ["LLM Wiki"](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) pattern — the LLM maintains a persistent, interlinked Markdown wiki instead of re-deriving knowledge from raw documents at query time — adapted to a harness plugin with a user-approved write gate.
 
-Every web search an agent runs is thrown away when the session ends. The next session re-searches, re-reads, re-pays. DSH-Wiki closes that loop:
+## Highlights
 
-| Layer | What lives there | On disk |
-| --- | --- | --- |
-| **Source Layer** | raw material: fetched pages, documents, quotes | `~/.dsh/wiki/sources/` |
-| **Wiki Layer** | distilled knowledge: concepts, entities, relations | `~/.dsh/wiki/concepts/`, `entities/` |
-
-`~/.dsh/wiki/index.md` is a generated table of contents; every mutation is journaled to `~/.dsh/wiki/logs/`.
-
-## How it works
-
-The plugin adds five model-facing tools plus a system-prompt playbook. The agent (the LLM) performs extraction and mutation analysis; the plugin makes the process **structured, incremental, and auditable**:
-
-| Tool | Role |
-| --- | --- |
-| `wiki_search` | ranked retrieval **plus the Knowledge Router verdict** (`coverage`, `use_wiki`, `need_web`, `advice`) — the wiki-first / web-fallback decision |
-| `wiki_inspect` | full page: frontmatter, body, inbound links, resolved sources |
-| `wiki_source_save` | persist raw material with URL + retrieval time; content-hash dedup |
-| `wiki_mutate` | batched incremental mutations: `create` / `update` / `merge` / `link` / `deprecate` |
-| `wiki_lint` | duplicate / broken-link / stale / orphan / deprecated-ref / oversize checks |
-
-Key mechanisms:
-
-- **Source–Wiki separation.** Wiki claims reference `sources:` ids; knowledge stays traceable to evidence.
-- **Admission Controller.** Every `create` must argue `reusability / stability / novelty / abstraction` (0..3 each). Transient events and one-off facts are rejected and journaled — the wiki does not become a log dump.
-- **Incremental Mutation.** Minimal diffs beat rewrites: `update` merges tags/links/sources, `merge` leaves redirect stubs, `deprecate` keeps history. Nothing is deleted.
-- **Knowledge Router.** Deterministic coverage scoring (token/phrase match + freshness) keeps the agent from re-fetching what the wiki already knows, and tells it exactly when to go to the web.
-- **Freshness.** Pages age through `fresh → aging → stale`; stale top hits downgrade the router verdict so time-sensitive claims get verified.
-- **Playbooks.** `prompts/*.md` ship as system-prompt guidance and are editable per deployment without a rebuild.
+- **Two layers.** A *Source Layer* of provenance cards (title + URL + date, never the page text) and a *Wiki Layer* of distilled concepts and entities under `~/.dsh/wiki/`.
+- **Seven tools + a compact prompt section.** `wiki_search`, `wiki_inspect`, `wiki_source_save`, `wiki_mutate`, `wiki_review`, `wiki_lint`, `wiki_guide`.
+- **Write gate.** Default `approval: staging`: proposals land in `<wiki>/staging/` with a rendered pitch; `wiki_review` puts them in front of you, and nothing is live until you approve. Declining a review discards the proposals it covered — the queue does not quietly accumulate.
+- **Admission Controller.** Every `create` must score `reusability / stability / novelty / abstraction`; transient facts are refused at proposal time, so the wiki never becomes a log dump.
+- **Incremental mutation.** `create / update / merge / link / deprecate` with minimal diffs; merges leave redirect stubs; nothing is deleted.
+- **Knowledge Router.** Deterministic coverage verdicts (`none / low / partial / high`) with per-hit match evidence: reuse the wiki when it is covered, go to the web when it is not.
+- **Web-access nudge.** A turn that browsed the web without touching the wiki gets one reminder folded into the *next step's input* — the turn is never extended.
+- **Sidebar browser.** On hosts with a web surface, a read-only "Wiki memory" tab on the right Sidebar (tree, page reader, staged proposals).
+- **Zero runtime dependencies** beyond the settings schema; retrieval is CJK-aware keyword search, swappable for BM25/embeddings without touching tool contracts.
 
 ## Installation
 
 DSH never builds a plugin: it loads the built entry declared in `package.json` (`main: ./lib/index.js`). This repository commits `lib/`, so every path below works without a build step.
 
-### DSH Desktop (GUI)
+**DSH Desktop (GUI):** Settings → Plugins → add a tarball (`pnpm pack` here, then pick `dsh-llm-wiki-<version>.tgz`), an absolute path to a local checkout (`file:D:/path/to/dsh-llm-wiki-plugin`), or a GitHub spec (`github:<owner>/dsh-llm-wiki#v0.2.0`). Restart DSH Desktop.
 
-Settings → Plugins → add one of:
-
-- a tarball: `pnpm pack` here, then pick `dsh-llm-wiki-<version>.tgz`;
-- an absolute path to a local checkout (`file:D:/WORKSPACE/dsh-llm-wiki-plugin`);
-- a GitHub spec once published: `github:<owner>/dsh-llm-wiki#v0.1.0`.
-
-Restart DSH Desktop.
-
-### CLI profiles (`dsh web`, `headless`, …)
+**CLI profiles** (`dsh web`, `headless`, …):
 
 ```powershell
-dsh plugin --profile web add D:/path/to/dsh-llm-wiki-0.1.0.tgz   # tarball
-dsh plugin --profile web add 'github:<owner>/dsh-llm-wiki#v0.1.0' # or git
+dsh plugin --profile web add D:/path/to/dsh-llm-wiki-0.2.0.tgz    # tarball
+dsh plugin --profile web add 'https://github.com/namingsohard/dsh-llm-wiki.git' # or git
 dsh --profile web --dump-config | Select-String wiki -Context 1,2
 ```
 
 Expect a `# == dsh-llm-wiki` layer containing `- id: wiki`. Then restart the app.
 
-### Verify
-
-Start a session and ask: *"What does the wiki know about X?"* A working install calls `wiki_search` and reports `coverage: none` on a fresh wiki. The wiki skeleton (`index.md`, `concepts/`, …) appears under `~/.dsh/wiki` on first start.
+**Verify:** start a session and ask *"What does the wiki know about X?"* A working install calls `wiki_search` and reports `coverage: none` on a fresh wiki; the skeleton (`index.md`, `concepts/`, …) appears under `~/.dsh/wiki` on first start.
 
 ## Configuration
 
-Optional, under the `wiki` key in `~/.dsh/settings.yaml` (all fields shown with defaults):
+Optional, under the `wiki` key in `~/.dsh/settings.yaml` (defaults shown):
 
 ```yaml
 wiki:
-  wikiRoot: ""                # empty = $DSH_WIKI_ROOT > $DSH_HOME/wiki > ~/.dsh/wiki (`~` expands)
+  wikiRoot: ""                # empty = $DSH_WIKI_ROOT > $DSH_HOME/wiki > ~/.dsh/wiki
   searchLimit: 8              # default wiki_search hits
   includeSourcesInSearch: false
-  agingAfterDays: 90          # freshness buckets
+  agingAfterDays: 90          # freshness buckets: fresh → aging → stale
   staleAfterDays: 365
   admissionMinAverage: 1.75   # CREATE gate: mean of the four scores
   admissionMinIndividual: 1   # CREATE gate: per-dimension floor
   maxPageBytes: 65536
-  maxSourceBytes: 262144      # source content cap (excess truncated)
   maxInspectBytes: 24576
   lintOrphans: true
   mutationLog: true
+  approval: staging           # staging | inline | off
+  maxStagedBytes: 65536       # per-proposal cap; oversized bodies are refused
+  nudge: next-step            # next-step | off
 ```
+
+## Privilege boundary
+
+The wiki lives at `~/.dsh/wiki` by default — **outside the session workspace** — and the plugin writes it with plain `node:fs` calls inside the harness process, so the DSH file sandbox (`read-only` / `workspace-write` / `danger-full-access`) does not gate these writes. Two things hold the line instead: page and staging ids are slug-validated (`/^[a-z0-9][a-z0-9._-]{0,79}$/`), so no tool call can escape the wiki root; and the write gate means nothing reaches the wiki layers without passing admission and, by default, your approval.
 
 ## Project layout
 
@@ -94,23 +72,21 @@ wiki:
 src/
 ├── index.ts                  plugin entry: name / inject / Config / apply
 ├── config.ts                 Schemastery config + wiki-root resolution
-├── prompt.ts                 system-prompt section builder (loads prompts/*.md)
-├── storage/
-│   ├── id-slug.ts            traversal-proof page ids
-│   ├── page-format.ts        canonical frontmatter parser/serializer
-│   └── markdown-store.ts     atomic file storage, index, journal
-├── retrieval/
-│   ├── freshness.ts          fresh / aging / stale
-│   └── grep-retriever.ts     phase-1 keyword retriever (CJK-aware)
-├── router/knowledge-router.ts  coverage verdict: reuse vs acquire
-├── mutation/
-│   ├── admission.ts          Admission Controller
-│   └── mutator.ts            CREATE / UPDATE / MERGE / LINK / DEPRECATE
-├── validator/wiki-linter.ts  duplicate / broken-link / stale / orphan
-└── tools/wiki-tools.ts       the five model-facing tools
+├── prompt.ts                 compact resident prompt + on-demand playbook reader
+├── storage/                  page format, atomic markdown store, staging area
+├── retrieval/                freshness buckets + CJK-aware keyword retriever
+├── router/                   coverage verdict: reuse the wiki or go acquire
+├── mutation/                 admission, review pitches, the five ops
+├── browser/                  read-only /wiki/* routes for the sidebar browser
+├── validator/                lint: duplicates, broken links, stale, orphans
+├── hooks/                    web-access nudge
+└── tools/                    the seven model-facing tools
+client/wiki-client.js         hand-written browser bundle (sidebar Wiki tab)
 prompts/                      router / extraction / mutation / validation playbooks
-test/                         vitest suites (storage, retrieval, mutation, linter, tools)
+test/                         vitest suites (112 tests)
 ```
+
+Deep design notes (why link-only sources, why the resident prompt is byte-stable, why the nudge rides the next step) live in `DSH-Wiki_Project_Blueprint.md` and the playbooks under `prompts/`.
 
 ## Development
 
@@ -118,15 +94,15 @@ test/                         vitest suites (storage, retrieval, mutation, linte
 pnpm install
 pnpm build        # tsc -> lib/ (committed; DSH loads it directly)
 pnpm typecheck
-pnpm test         # vitest, 58 tests
-pnpm smoke        # end-to-end knowledge loop on the built artifact
+pnpm test         # vitest, 112 tests
+pnpm smoke        # end-to-end passes against the built artifact
+pnpm prompt:size  # guard the resident-prompt byte budget
 ```
 
-Design notes:
+## References
 
-- **Zero runtime dependencies** beyond `@deepseek-ai/schemastery` (the settings schema); retrieval is deliberately grep-grade in phase 1 — a BM25/embedding retriever can replace `grep-retriever.ts` without touching tool contracts.
-- All writes are atomic (temp + rename) and serialized; page ids are slug-validated so no call can escape the wiki root.
-- The plugin treats the agent as the extractor and the store as the judge: prompts guide, code enforces.
+- [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — the host this plugin extends.
+- Andrej Karpathy, [LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) — the source-layer/wiki-layer/schema pattern this plugin implements; itself in the lineage of Vannevar Bush's Memex (1945).
 
 ## License
 

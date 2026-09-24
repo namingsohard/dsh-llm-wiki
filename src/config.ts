@@ -11,6 +11,25 @@ import { join, resolve } from 'node:path';
  * @module dsh-llm-wiki/config
  */
 
+/**
+ * How a write reaches the live wiki.
+ * - `staging`: proposed writes park in `staging/` (invisible to search and lint)
+ *   until the user approves them through `wiki_review`. The default.
+ * - `inline`: ask through the harness approval seam at call time.
+ * - `off`: apply writes immediately (the v0.1 behaviour).
+ */
+export type WikiApprovalMode = 'staging' | 'inline' | 'off';
+
+/**
+ * The web-access nudge (see `hooks/wiki-nudge.ts`).
+ * - `next-step`: when a turn used web tools without any wiki tool, fold one
+ *   reminder into the next step's input — before the model composes its answer,
+ *   and without extending the turn. The default.
+ * - `off`: register no listeners; the prompt is the only guidance.
+ * The legacy spelling `turn-end` is accepted and normalized to `next-step`.
+ */
+export type WikiNudgeMode = 'next-step' | 'off';
+
 /** Fully-resolved plugin configuration. */
 export interface WikiConfig {
   /** Absolute-or-empty wiki root. Empty means "auto-resolve" (see {@link resolveWikiRoot}). */
@@ -29,14 +48,18 @@ export interface WikiConfig {
   admissionMinIndividual: number;
   /** Hard cap on one wiki page file (bytes). */
   maxPageBytes: number;
-  /** Raw content cap for one source page (bytes); excess is truncated. */
-  maxSourceBytes: number;
   /** `wiki_inspect` body cap (bytes); excess is truncated with a flag. */
   maxInspectBytes: number;
   /** Whether the linter reports orphan pages. */
   lintOrphans: boolean;
   /** Whether mutations are appended to `logs/`. */
   mutationLog: boolean;
+  /** Write gate: how a proposed write reaches the live wiki. */
+  approval: WikiApprovalMode;
+  /** Cap on one staged payload (bytes); oversized writes are refused at stage time. */
+  maxStagedBytes: number;
+  /** Reminder folded into the next step after a turn browsed the web without the wiki. */
+  nudge: WikiNudgeMode;
 }
 
 export const DEFAULT_CONFIG: WikiConfig = {
@@ -48,10 +71,12 @@ export const DEFAULT_CONFIG: WikiConfig = {
   admissionMinAverage: 1.75,
   admissionMinIndividual: 1,
   maxPageBytes: 64 * 1024,
-  maxSourceBytes: 256 * 1024,
   maxInspectBytes: 24 * 1024,
   lintOrphans: true,
   mutationLog: true,
+  approval: 'staging',
+  maxStagedBytes: 64 * 1024,
+  nudge: 'next-step',
 };
 
 /** Schemastery configuration for the `wiki` plugin consumer. */
@@ -66,7 +91,7 @@ export const Config = Schema.object({
     .description('Default number of hits returned by wiki_search.'),
   includeSourcesInSearch: Schema.boolean()
     .default(DEFAULT_CONFIG.includeSourcesInSearch)
-    .description('Whether wiki_search searches the Source Layer (raw materials) by default.'),
+    .description('Whether wiki_search searches the Source Layer (source cards: titles and links) by default.'),
   agingAfterDays: Schema.number()
     .min(1)
     .max(3650)
@@ -92,11 +117,6 @@ export const Config = Schema.object({
     .max(1024 * 1024)
     .default(DEFAULT_CONFIG.maxPageBytes)
     .description('Hard size cap for one wiki page file, in bytes.'),
-  maxSourceBytes: Schema.number()
-    .min(1024)
-    .max(2 * 1024 * 1024)
-    .default(DEFAULT_CONFIG.maxSourceBytes)
-    .description('Raw content cap for one source page, in bytes; excess content is truncated.'),
   maxInspectBytes: Schema.number()
     .min(1024)
     .max(1024 * 1024)
@@ -108,6 +128,15 @@ export const Config = Schema.object({
   mutationLog: Schema.boolean()
     .default(DEFAULT_CONFIG.mutationLog)
     .description('Whether mutations are appended to the wiki logs/ journal.'),
+  approval: Schema.union([Schema.const('staging'), Schema.const('inline'), Schema.const('off')])
+    .default(DEFAULT_CONFIG.approval)
+    .description('Write gate. staging (default): every write parks in <wiki>/staging/ (invisible to search and lint) until the user approves it through wiki_review; inline: the same gate, but the write itself prompts through the harness approval channel; off: apply writes immediately.'),
+  maxStagedBytes: Schema.natural()
+    .default(DEFAULT_CONFIG.maxStagedBytes)
+    .description('Cap on one staged payload in bytes; oversized bodies are refused at stage time rather than truncated.'),
+  nudge: Schema.union([Schema.const('next-step'), Schema.const('turn-end'), Schema.const('off')])
+    .default(DEFAULT_CONFIG.nudge)
+    .description('Web-access nudge. next-step (default): if a turn called web_search / web_fetch while no wiki tool ran, fold one reminder into the next step input so the model checks the wiki before composing its answer (the turn is not extended). "turn-end" is accepted as a legacy alias for next-step. off: no listeners are registered.'),
 });
 
 /** Fill defaults and normalize inter-field constraints. */
@@ -121,13 +150,20 @@ export function resolveConfig(config?: Partial<WikiConfig> | undefined): WikiCon
     admissionMinAverage: config?.admissionMinAverage ?? DEFAULT_CONFIG.admissionMinAverage,
     admissionMinIndividual: config?.admissionMinIndividual ?? DEFAULT_CONFIG.admissionMinIndividual,
     maxPageBytes: config?.maxPageBytes ?? DEFAULT_CONFIG.maxPageBytes,
-    maxSourceBytes: config?.maxSourceBytes ?? DEFAULT_CONFIG.maxSourceBytes,
     maxInspectBytes: config?.maxInspectBytes ?? DEFAULT_CONFIG.maxInspectBytes,
     lintOrphans: config?.lintOrphans ?? DEFAULT_CONFIG.lintOrphans,
     mutationLog: config?.mutationLog ?? DEFAULT_CONFIG.mutationLog,
+    approval: config?.approval ?? DEFAULT_CONFIG.approval,
+    maxStagedBytes: config?.maxStagedBytes ?? DEFAULT_CONFIG.maxStagedBytes,
+    // Absent, legacy (`turn-end`) and foreign values all normalize to the one
+    // live mode; only an explicit `off` turns the hook off.
+    nudge: String(config?.nudge ?? DEFAULT_CONFIG.nudge) === 'off' ? 'off' : 'next-step',
   };
   // A page cannot be stale before it is aging.
   if (merged.staleAfterDays < merged.agingAfterDays) merged.staleAfterDays = merged.agingAfterDays;
+  // A hand-edited settings.yaml must not silently disable the write gate.
+  if (merged.approval !== 'staging' && merged.approval !== 'inline' && merged.approval !== 'off') merged.approval = DEFAULT_CONFIG.approval;
+  if (merged.maxStagedBytes < 1024) merged.maxStagedBytes = 1024;
   return merged;
 }
 

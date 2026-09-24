@@ -4,11 +4,13 @@ import { type WikiConfig } from './config.js';
  * DSH-Wiki — Agent Semantic Memory plugin for the DeepSeek Harness.
  *
  * Gives the agent a long-term semantic memory layered over the filesystem
- * (`~/.dsh/wiki` by default): a Source Layer of raw material and a Wiki
- * Layer of concepts/entities/relations, reached through five tools
+ * (`~/.dsh/wiki` by default): a Source Layer of provenance cards (a link and
+ * a retrieval time — the wiki never stores the original text) and a Wiki
+ * Layer of concepts/entities/relations, reached through seven tools
  * (`wiki_search`, `wiki_inspect`, `wiki_source_save`, `wiki_mutate`,
- * `wiki_lint`) and governed by prompt playbooks (Knowledge Router,
- * extraction, incremental mutation, validation).
+ * `wiki_review`, `wiki_lint`, `wiki_guide`) and governed by prompt playbooks
+ * (Knowledge Router, extraction, incremental mutation, validation) pulled on
+ * demand rather than inlined into the system prompt.
  *
  * Settings live under the `wiki` key of DSH settings. Named exports follow
  * the Cordis plugin contract (`name` / `inject` / `Config` / `apply`).
@@ -28,10 +30,12 @@ export declare const Config: import("@deepseek-ai/schemastery").default<Schemast
     admissionMinAverage: import("@deepseek-ai/schemastery").default<number, number>;
     admissionMinIndividual: import("@deepseek-ai/schemastery").default<number, number>;
     maxPageBytes: import("@deepseek-ai/schemastery").default<number, number>;
-    maxSourceBytes: import("@deepseek-ai/schemastery").default<number, number>;
     maxInspectBytes: import("@deepseek-ai/schemastery").default<number, number>;
     lintOrphans: import("@deepseek-ai/schemastery").default<boolean, boolean>;
     mutationLog: import("@deepseek-ai/schemastery").default<boolean, boolean>;
+    approval: import("@deepseek-ai/schemastery").default<"staging" | "inline" | "off", "staging" | "inline" | "off">;
+    maxStagedBytes: import("@deepseek-ai/schemastery").default<number, number>;
+    nudge: import("@deepseek-ai/schemastery").default<"off" | "next-step" | "turn-end", "off" | "next-step" | "turn-end">;
 }>, Schemastery.ObjectT<{
     wikiRoot: import("@deepseek-ai/schemastery").default<string, string>;
     searchLimit: import("@deepseek-ai/schemastery").default<number, number>;
@@ -41,10 +45,12 @@ export declare const Config: import("@deepseek-ai/schemastery").default<Schemast
     admissionMinAverage: import("@deepseek-ai/schemastery").default<number, number>;
     admissionMinIndividual: import("@deepseek-ai/schemastery").default<number, number>;
     maxPageBytes: import("@deepseek-ai/schemastery").default<number, number>;
-    maxSourceBytes: import("@deepseek-ai/schemastery").default<number, number>;
     maxInspectBytes: import("@deepseek-ai/schemastery").default<number, number>;
     lintOrphans: import("@deepseek-ai/schemastery").default<boolean, boolean>;
     mutationLog: import("@deepseek-ai/schemastery").default<boolean, boolean>;
+    approval: import("@deepseek-ai/schemastery").default<"staging" | "inline" | "off", "staging" | "inline" | "off">;
+    maxStagedBytes: import("@deepseek-ai/schemastery").default<number, number>;
+    nudge: import("@deepseek-ai/schemastery").default<"off" | "next-step" | "turn-end", "off" | "next-step" | "turn-end">;
 }>>;
 export type Config = WikiConfig;
 export { resolveConfig, resolveWikiRoot } from './config.js';

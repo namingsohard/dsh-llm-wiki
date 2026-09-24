@@ -21,6 +21,4 @@ export declare function shortHash(input: string): string;
 export declare function slugifyTitle(title: string): string;
 /** Deterministic id for a saved source: `src-<yyyymmdd>-<hash8>`. */
 export declare function sourceId(url: string | undefined, title: string, obtained: Date): string;
-/** Content hash of raw material, used for source deduplication. */
-export declare function contentHash(content: string): string;
 //# sourceMappingURL=id-slug.d.ts.map

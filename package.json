@@ -1,6 +1,6 @@
 {
   "name": "dsh-llm-wiki",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Agent semantic memory for DeepSeek Harness: a file-based Markdown wiki with knowledge routing, incremental mutation, and linting.",
   "type": "module",
   "main": "./lib/index.js",
@@ -10,6 +10,7 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
   "files": [
@@ -21,11 +22,12 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/build-client.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "smoke": "node scripts/smoke.mjs",
+    "prompt:size": "node scripts/prompt-size.mjs",
     "prepack": "pnpm build && pnpm typecheck"
   },
   "keywords": [
@@ -43,12 +45,14 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-session"
+      ]
     }
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild"
-    ]
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "3.18.2"

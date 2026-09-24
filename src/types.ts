@@ -1,14 +1,15 @@
 /**
  * Domain types shared by the DSH-Wiki plugin modules.
  *
- * The wiki is a file-based semantic memory layer: a Source Layer of raw
- * material and a Wiki Layer of structured knowledge (concepts, entities,
- * relations). Pages are Markdown files with a constrained frontmatter.
+ * The wiki is a file-based semantic memory layer: a Source Layer of provenance
+ * cards (title + link + retrieval time; the original text is never stored) and
+ * a Wiki Layer of structured knowledge (concepts, entities, relations). Pages
+ * are Markdown files with a constrained frontmatter.
  *
  * @module dsh-llm-wiki/types
  */
 
-/** Page classes. `source` is the raw-material layer; the others form the wiki layer. */
+/** Page classes. `source` is the provenance layer; the others form the wiki layer. */
 export type PageKind = 'concept' | 'entity' | 'source';
 
 /** Lifecycle of a page. Merged pages remain as redirect stubs (history preservation). */
@@ -65,24 +66,51 @@ export interface SearchHit {
   status: PageStatus;
   /** Relative relevance score; higher is better, always > 0 for returned hits. */
   score: number;
+  /** How much of the query this page actually matched — the coverage evidence behind `score`. */
+  match: MatchStats;
   freshness: Freshness;
   /** Text window around the strongest match. */
   snippet: string;
   updated: string;
 }
 
+/**
+ * Weighted term accounting for one hit, as reported by the retriever.
+ *
+ * Weights are per query token and reflect specificity: a full Latin word or Han
+ * bigram counts 1, a lone Han character 0.4 (it is a substring of many
+ * unrelated words), a two-letter Latin token 0.6. Everything here is expressed
+ * in those units, so `matched / total` is a coverage ratio in [0, 1] and
+ * `strong >= 1` means at least one specific term hit the title or a tag.
+ */
+export interface MatchStats {
+  /** Weighted query terms this page matched, in any field. */
+  matched: number;
+  /** Weighted content-bearing query terms the query asked for. */
+  total: number;
+  /** Weighted subset of {@link MatchStats.matched} found in the title or tags. */
+  strong: number;
+}
+
 /** How well the existing wiki covers a query; drives the Knowledge Router. */
 export type Coverage = 'none' | 'low' | 'partial' | 'high';
+
+/** Playbook topics served by `wiki_guide`. */
+export type GuideTopic = 'router' | 'extraction' | 'mutation' | 'validation';
 
 /** Router verdict returned alongside every `wiki_search`. */
 export interface RouterDecision {
   coverage: Coverage;
-  /** Reuse wiki content directly (high) or after inspection (partial). */
+  /** The wiki is a primary source for this answer (`high`) or worth judging first (`partial`). */
   useWiki: boolean;
-  /** Fall back to external acquisition (web search / document reading). */
+  /** The wiki alone is not enough: something must come from outside. For `partial` that is only the gap. */
   needWeb: boolean;
-  /** One-sentence guidance rendered for the model. */
+  /** Guidance rendered for the model. `high`/`low`/`none` state a course of action; `partial` states the evidence and leaves the call to the agent. */
   advice: string;
+  /** The single next call to make, spelled out. Progressive disclosure: the step travels with the verdict that makes it relevant. */
+  nextStep: string;
+  /** Which playbook detail fits this verdict (`wiki_guide` topic). */
+  guideTopic: GuideTopic;
   /** Top hit, when any. */
   topHit?: SearchHit;
 }

@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { WikiStore } from '../src/storage/markdown-store.js';
-import { searchWiki, tokenize } from '../src/retrieval/grep-retriever.js';
-import { routeQuery, coverageFromScore } from '../src/router/knowledge-router.js';
+import { searchWiki, tokenize, queryTokens, tokenWeight } from '../src/retrieval/grep-retriever.js';
+import { routeQuery, coverageFromScore, isTimeSensitive } from '../src/router/knowledge-router.js';
 import { slugifyTitle, sourceId, assertPageId } from '../src/storage/id-slug.js';
 import type { SearchHit, WikiPage } from '../src/types.js';
 
@@ -99,6 +99,71 @@ describe('tokenize', () => {
   });
 });
 
+describe('query-side tokens', () => {
+  it('drops function words, which matched anything and answered nothing', () => {
+    expect(queryTokens('what is the best way to compact context')).toEqual(['best', 'way', 'compact', 'context']);
+    // A query that is nothing but function words keeps its tokens.
+    expect(queryTokens('the and of')).toEqual(['the', 'and', 'of']);
+  });
+
+  it('discounts a lone Han character against a bigram or a word', () => {
+    expect(tokenWeight('地')).toBeLessThan(tokenWeight('地图'));
+    expect(tokenWeight('地图')).toBe(tokenWeight('planet'));
+  });
+});
+
+// The bug this guards: one shared word was enough for the router to send the
+// agent to read an unrelated page, and then to fold a new subject into it.
+describe('coverage honesty', () => {
+  const search = (query: string) =>
+    searchWiki(store, { query, limit: 10, includeDeprecated: false, agingAfterDays: 90, staleAfterDays: 365 });
+
+  async function seedEarth(): Promise<void> {
+    await store.writePage(page({
+      id: 'earth',
+      title: 'Earth as a Planet',
+      tags: ['astronomy'],
+      body: 'Earth is the third planet from the Sun; its mass and orbit are typical of terrestrial planets.\n',
+      path: join(root, 'concepts', 'earth.md'),
+    }));
+  }
+
+  it('reads an Earth page as background for a question about maps', async () => {
+    await seedEarth();
+    const result = await search('map projections of the earth surface');
+    const decision = routeQuery(result.hits, 'map projections of the earth surface');
+    expect(result.hits.map((h) => h.id)).toContain('earth'); // visible as background
+    expect(decision.coverage).toBe('low'); // but not an answer to read first
+    expect(decision.needWeb).toBe(true);
+  });
+
+  it('still reads the same page as full coverage when the query is about it', async () => {
+    await seedEarth();
+    const result = await search('earth planet mass');
+    expect(routeQuery(result.hits, 'earth planet mass').coverage).toBe('high');
+  });
+
+  it('does not let one shared Han character carry the coverage', async () => {
+    await store.writePage(page({
+      id: 'diqiu',
+      title: '地球',
+      body: '地球是太阳系第三颗行星。\n',
+      path: join(root, 'concepts', 'diqiu.md'),
+    }));
+    const query = '地图 地理';
+    const result = await search(query);
+    const decision = routeQuery(result.hits, query);
+    expect(result.hits.map((h) => h.id)).toContain('diqiu');
+    expect(decision.coverage).toBe('low');
+  });
+
+  it('reports the match evidence with every hit', async () => {
+    await seedEarth();
+    const [top] = (await search('earth planet mass')).hits;
+    expect(top?.match).toEqual({ matched: 3, total: 3, strong: 2 });
+  });
+});
+
 describe('searchWiki', () => {
   it('ranks title matches above body matches', async () => {
     const result = await searchWiki(store, { query: 'context compaction', limit: 10, includeDeprecated: false, agingAfterDays: 90, staleAfterDays: 365 });
@@ -142,12 +207,13 @@ describe('searchWiki', () => {
 });
 
 describe('knowledge router', () => {
-  const hit = (score: number, freshness: SearchHit['freshness'] = 'fresh'): SearchHit => ({
+  const hit = (score: number, freshness: SearchHit['freshness'] = 'fresh', match: SearchHit['match'] = { matched: 3, total: 3, strong: 3 }): SearchHit => ({
     id: 'x',
     kind: 'concept',
     title: 'X',
     status: 'active',
     score,
+    match,
     freshness,
     snippet: '',
     updated: new Date().toISOString(),
@@ -161,11 +227,39 @@ describe('knowledge router', () => {
     expect(coverageFromScore(9)).toBe('high');
   });
 
-  it('high coverage says reuse the wiki', () => {
-    const decision = routeQuery([hit(10)], 'how does context compaction work');
+  // Regression: a page about Earth used to read as `partial` coverage for a
+  // question about maps. One shared word in the title scored 4, and 3 was the
+  // whole bar — nothing asked how much of the question that page answered.
+  it('will not call one incidental term partial coverage', () => {
+    expect(coverageFromScore(4, { matched: 1, total: 3, strong: 1 })).toBe('low');
+    expect(coverageFromScore(9, { matched: 1, total: 8, strong: 1 })).toBe('low');
+    // Same score, most of the question actually matched: still partial/high.
+    expect(coverageFromScore(4, { matched: 2, total: 3, strong: 0 })).toBe('partial');
+    expect(coverageFromScore(9, { matched: 6, total: 8, strong: 2 })).toBe('high');
+  });
+
+  it('needs a title or tag term for high coverage', () => {
+    // Everything matched somewhere in the body of a long page: not an answer.
+    expect(coverageFromScore(10, { matched: 6, total: 6, strong: 0 })).toBe('partial');
+  });
+
+  it('reports high when the query is fully covered in the title', () => {
+    const decision = routeQuery([hit(14, 'fresh', { matched: 2, total: 2, strong: 2 })], 'context compaction');
     expect(decision.coverage).toBe('high');
     expect(decision.useWiki).toBe(true);
     expect(decision.needWeb).toBe(false);
+  });
+
+  it('partial hands the reading of the evidence to the agent', () => {
+    const decision = routeQuery([hit(5, 'fresh', { matched: 2, total: 4, strong: 1 })], 'how does compaction work');
+    expect(decision.coverage).toBe('partial');
+    // It must present the evidence and both branches, not order a wiki_inspect.
+    expect(decision.advice).toMatch(/matched 2\/4 of your query terms/);
+    expect(decision.advice).toMatch(/you know the question, the score does not/);
+    expect(decision.advice).toMatch(/Different subject/);
+    expect(decision.advice).toMatch(/CREATE its own page/);
+    expect(decision.nextStep.startsWith('wiki_inspect')).toBe(false);
+    expect(decision.needWeb).toBe(true);
   });
 
   it('time-sensitive queries are never fully covered', () => {
@@ -184,6 +278,28 @@ describe('knowledge router', () => {
     expect(decision.coverage).toBe('none');
     expect(decision.needWeb).toBe(true);
     expect(decision.advice).toContain('wiki_source_save');
+  });
+
+  // Regression: JS \b only counts [A-Za-z0-9_] as word characters, so the old
+  // single regex could never match a CJK time term inside natural Chinese.
+  it('detects CJK time terms without ascii word boundaries', () => {
+    expect(isTimeSensitive('最新的 dsh plugin API')).toBe(true);
+    expect(isTimeSensitive('dsh 最新的插件 API 是什么')).toBe(true);
+    expect(isTimeSensitive('今天天气怎么样')).toBe(true);
+    expect(isTimeSensitive('当前配置的默认值')).toBe(true);
+    expect(isTimeSensitive('2025 年发布的版本')).toBe(true);
+    expect(isTimeSensitive('this month 的变更')).toBe(true);
+  });
+
+  it('does not flag ordinary queries', () => {
+    expect(isTimeSensitive('怎么写一个 cordis 插件')).toBe(false);
+    expect(isTimeSensitive('context compaction design')).toBe(false);
+  });
+
+  it('a Chinese time-sensitive query loses full coverage', () => {
+    const decision = routeQuery([hit(12)], 'dsh 最新的插件 API 是什么');
+    expect(decision.coverage).toBe('partial');
+    expect(decision.needWeb).toBe(true);
   });
 });
 

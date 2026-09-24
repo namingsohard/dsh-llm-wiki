@@ -1,8 +1,32 @@
+# Dependencies
 node_modules/
+.pnpm-store/
+
+# Build & test output
+# NOTE: lib/ is deliberately committed — DSH never builds plugins; it loads
+# main: ./lib/index.js directly. Do not add lib/ here.
 coverage/
 *.tsbuildinfo
-.DS_Store
+
+# Package artifacts
+*.tgz
+
+# Logs & temp
 *.log
 .tmp/
-.pnpm-store/
-*.tgz
+
+# OS droppings
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors & local agent state
+.vscode/
+.idea/
+*.swp
+.agent/
+
+# Environment overrides
+.env
+.env.*
+!.env.example

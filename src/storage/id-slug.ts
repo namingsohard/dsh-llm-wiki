@@ -1,5 +1,3 @@
-import { createHash } from 'node:crypto';
-
 /**
  * Id/slug helpers. Page ids are filenames, so they must be traversal-proof:
  * lowercase ASCII slugs with a strict allowlist. Titles outside that range
@@ -62,9 +60,4 @@ export function sourceId(url: string | undefined, title: string, obtained: Date)
   const key = url !== undefined && url.length > 0 ? url : `title:${title}`;
   const ymd = obtained.toISOString().slice(0, 10).replaceAll('-', '');
   return `src-${ymd}-${shortHash(key)}`;
-}
-
-/** Content hash of raw material, used for source deduplication. */
-export function contentHash(content: string): string {
-  return createHash('sha1').update(content, 'utf8').digest('hex').slice(0, 12);
 }

@@ -7,6 +7,23 @@ import Schema from '@deepseek-ai/schemastery';
  *
  * @module dsh-llm-wiki/config
  */
+/**
+ * How a write reaches the live wiki.
+ * - `staging`: proposed writes park in `staging/` (invisible to search and lint)
+ *   until the user approves them through `wiki_review`. The default.
+ * - `inline`: ask through the harness approval seam at call time.
+ * - `off`: apply writes immediately (the v0.1 behaviour).
+ */
+export type WikiApprovalMode = 'staging' | 'inline' | 'off';
+/**
+ * The web-access nudge (see `hooks/wiki-nudge.ts`).
+ * - `next-step`: when a turn used web tools without any wiki tool, fold one
+ *   reminder into the next step's input — before the model composes its answer,
+ *   and without extending the turn. The default.
+ * - `off`: register no listeners; the prompt is the only guidance.
+ * The legacy spelling `turn-end` is accepted and normalized to `next-step`.
+ */
+export type WikiNudgeMode = 'next-step' | 'off';
 /** Fully-resolved plugin configuration. */
 export interface WikiConfig {
     /** Absolute-or-empty wiki root. Empty means "auto-resolve" (see {@link resolveWikiRoot}). */
@@ -25,14 +42,18 @@ export interface WikiConfig {
     admissionMinIndividual: number;
     /** Hard cap on one wiki page file (bytes). */
     maxPageBytes: number;
-    /** Raw content cap for one source page (bytes); excess is truncated. */
-    maxSourceBytes: number;
     /** `wiki_inspect` body cap (bytes); excess is truncated with a flag. */
     maxInspectBytes: number;
     /** Whether the linter reports orphan pages. */
     lintOrphans: boolean;
     /** Whether mutations are appended to `logs/`. */
     mutationLog: boolean;
+    /** Write gate: how a proposed write reaches the live wiki. */
+    approval: WikiApprovalMode;
+    /** Cap on one staged payload (bytes); oversized writes are refused at stage time. */
+    maxStagedBytes: number;
+    /** Reminder folded into the next step after a turn browsed the web without the wiki. */
+    nudge: WikiNudgeMode;
 }
 export declare const DEFAULT_CONFIG: WikiConfig;
 /** Schemastery configuration for the `wiki` plugin consumer. */
@@ -45,10 +66,12 @@ export declare const Config: Schema<Schemastery.ObjectS<{
     admissionMinAverage: Schema<number, number>;
     admissionMinIndividual: Schema<number, number>;
     maxPageBytes: Schema<number, number>;
-    maxSourceBytes: Schema<number, number>;
     maxInspectBytes: Schema<number, number>;
     lintOrphans: Schema<boolean, boolean>;
     mutationLog: Schema<boolean, boolean>;
+    approval: Schema<"staging" | "inline" | "off", "staging" | "inline" | "off">;
+    maxStagedBytes: Schema<number, number>;
+    nudge: Schema<"off" | "next-step" | "turn-end", "off" | "next-step" | "turn-end">;
 }>, Schemastery.ObjectT<{
     wikiRoot: Schema<string, string>;
     searchLimit: Schema<number, number>;
@@ -58,10 +81,12 @@ export declare const Config: Schema<Schemastery.ObjectS<{
     admissionMinAverage: Schema<number, number>;
     admissionMinIndividual: Schema<number, number>;
     maxPageBytes: Schema<number, number>;
-    maxSourceBytes: Schema<number, number>;
     maxInspectBytes: Schema<number, number>;
     lintOrphans: Schema<boolean, boolean>;
     mutationLog: Schema<boolean, boolean>;
+    approval: Schema<"staging" | "inline" | "off", "staging" | "inline" | "off">;
+    maxStagedBytes: Schema<number, number>;
+    nudge: Schema<"off" | "next-step" | "turn-end", "off" | "next-step" | "turn-end">;
 }>>;
 /** Fill defaults and normalize inter-field constraints. */
 export declare function resolveConfig(config?: Partial<WikiConfig> | undefined): WikiConfig;
