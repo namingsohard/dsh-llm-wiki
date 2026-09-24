@@ -26,13 +26,12 @@ Search → Understand → Abstract → Store → Reuse → Update
 
 DSH 从不构建插件：它直接加载 `package.json` 声明的构建产物（`main: ./lib/index.js`）。本仓库提交 `lib/`，以下任何一种方式都无需本地构建。
 
-**DSH Desktop（GUI）：** 设置 → 插件 → 添加以下任一形式：tarball（在本仓库 `pnpm pack`，选择生成的 `dsh-llm-wiki-<version>.tgz`）、本地检出目录（`file:D:/path/to/dsh-llm-wiki-plugin`）、或 GitHub 引用（`github:<owner>/dsh-llm-wiki#v0.2.0`）。重启 DSH Desktop。
+**DSH Desktop（GUI）：** 设置 → 插件 → 添加 `github:namingsohard/dsh-llm-wiki`（追加 `#<tag>` 可锁定版本）。离线场景在检出的仓库里 `pnpm pack`，选择生成的 `dsh-llm-wiki-<version>.tgz`。重启 DSH Desktop。
 
 **CLI profile**（`dsh web`、`headless` 等）：
 
 ```powershell
-dsh plugin --profile web add D:/path/to/dsh-llm-wiki-0.2.0.tgz    # tarball
-dsh plugin --profile web add 'github:<owner>/dsh-llm-wiki#v0.2.0' # 或 git
+dsh plugin --profile web add 'github:namingsohard/dsh-llm-wiki'
 dsh --profile web --dump-config | Select-String wiki -Context 1,2
 ```
 

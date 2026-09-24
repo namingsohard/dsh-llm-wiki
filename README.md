@@ -26,13 +26,12 @@ The design follows Andrej Karpathy's ["LLM Wiki"](https://gist.github.com/karpat
 
 DSH never builds a plugin: it loads the built entry declared in `package.json` (`main: ./lib/index.js`). This repository commits `lib/`, so every path below works without a build step.
 
-**DSH Desktop (GUI):** Settings → Plugins → add a tarball (`pnpm pack` here, then pick `dsh-llm-wiki-<version>.tgz`), an absolute path to a local checkout (`file:D:/path/to/dsh-llm-wiki-plugin`), or a GitHub spec (`github:<owner>/dsh-llm-wiki#v0.2.0`). Restart DSH Desktop.
+**DSH Desktop (GUI):** Settings → Plugins → add `github:namingsohard/dsh-llm-wiki` (append `#<tag>` to pin a release). Offline, `pnpm pack` in a checkout and pick the generated `dsh-llm-wiki-<version>.tgz`. Restart DSH Desktop.
 
 **CLI profiles** (`dsh web`, `headless`, …):
 
 ```powershell
-dsh plugin --profile web add D:/path/to/dsh-llm-wiki-0.2.0.tgz    # tarball
-dsh plugin --profile web add 'https://github.com/namingsohard/dsh-llm-wiki.git' # or git
+dsh plugin --profile web add 'github:namingsohard/dsh-llm-wiki'
 dsh --profile web --dump-config | Select-String wiki -Context 1,2
 ```
 
