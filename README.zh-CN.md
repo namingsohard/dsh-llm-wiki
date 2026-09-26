@@ -39,6 +39,22 @@ dsh --profile web --dump-config | Select-String wiki -Context 1,2
 
 **验证：** 新建会话提问 *“Wiki 里关于 X 有什么知识？”*。安装成功的表现是 Agent 调用 `wiki_search` 并在全新 Wiki 上返回 `coverage: none`；首次启动后 `~/.dsh/wiki` 下会出现骨架（`index.md`、`concepts/` 等）。
 
+## 宿主兼容性
+
+已在 **dsh 0.1.5-rc.1 至 0.1.7-rc.2** 上验证。宿主是否加载本插件，由 `dsh-app-boot` 决定：它取出 `peerDependencies` 中所有 `@deepseek-ai/dsh*` 键，逐个执行 `semver.satisfies(宿主版本, range, { includePrerelease: true })`。只要有一个不满足，整个 bundle 就会被跳过——宿主日志里只留下一行 `Plugin dsh-llm-wiki@… is incompatible with dsh …`，插件条目被置为 disabled，而“工具凭空消失”这件事再没有别的线索。所以这些 range 是一份**逐个列出已实测版本**的 `||` 清单，而不是罩住未测版本的 caret：宁可诚实说“还没验证”，也不要虚假声明支持。
+
+| 宿主线 | 版本 | 说明 |
+| --- | --- | --- |
+| 0.1.5-rc.1 → 0.1.6-alpha.2 | rc.1、rc.2、rc.3、alpha.1、alpha.2 | 会话格式 **v3** |
+| 0.1.7-alpha.1 → 0.1.7-rc.2 | alpha.1、alpha.2、rc.1、rc.2 | 会话格式 **v4** |
+
+0.1.7 对这样一个插件改了什么，代码又是怎么应对的：
+
+- **会话格式 v4** 废弃了 `{ kind: 'plugin', plugin: <name> }` 这种消息来源：以它落盘会被拒绝（*format v4 message requires a producer-owned source kind*），而 v3→v4 迁移会把未知生产者的旧记录改写成 `plugin:<name>`。因此提醒消息的来源签名为 `plugin:dsh-llm-wiki`——在 v4 上合法，在 v3 上同样合法（v3 只要求 `kind` 是非空字符串），并且与它自己的 v4 之前记录迁移后的结果完全一致。
+- **观测从 waterfall 上撤下。** 回合计数器现在挂在 `tools/result`（对已冻结终态的 emit，监听器抛错由宿主自行兜住）而不是 `tools/post-execute`，一个 wiki 观测者再也不可能挡在工具决策的链路上。折叠 `agent/pre-step` 决策时用展开而非重建，晚于本插件出现的新字段能够原样穿过。
+
+其余触点——`defineTool`、`user-approval` 的请求形态、`agent/pre-step`、`webServer.register`、`ctx.get('connection', false).requestRejection`、右侧边栏标签页的 seat 与客户端 manifest——在整个区间内声明一致。清单与实测清单一旦脱节，`test/compat.test.ts` 就会失败；要支持新的宿主版本，就是把它同时加进该测试和两条 peer range。
+
 ## 配置
 
 可选，写在 `~/.dsh/settings.yaml` 的 `wiki` 键下（下列为默认值）：
@@ -82,7 +98,7 @@ src/
 └── tools/                    7 个模型可见工具
 client/wiki-client.js         手写浏览器 bundle（侧栏 Wiki tab）
 prompts/                      路由 / 抽取 / 变更 / 校验 playbook
-test/                         vitest 测试（112 个）
+test/                         vitest 测试（132 个，含宿主兼容性契约测试）
 ```
 
 更深的设计论证（源层为何只存链接、常驻提示词为何字节稳定、提醒为何走下一步输入）见 `DSH-Wiki_Project_Blueprint.md` 与 `prompts/` 下的 playbooks。
@@ -93,10 +109,12 @@ test/                         vitest 测试（112 个）
 pnpm install
 pnpm build        # tsc -> lib/（已提交，DSH 直接加载）
 pnpm typecheck
-pnpm test         # vitest，112 个测试
+pnpm test         # vitest，132 个测试
 pnpm smoke        # 对构建产物跑端到端
 pnpm prompt:size  # 常驻提示词的体积守卫
 ```
+
+`pnpm-workspace.yaml` 固定了 `nodeLinker: hoisted`。宿主是从本仓库之外 `import()` `lib/index.js` 的，`pnpm smoke` 也一样；pnpm 默认的隔离布局会把宿主 peer 藏在 junction 之后，而 Node 的 ESM 解析器不会从中走出来，只有扁平树才能让产物按宿主加载它的方式被加载。
 
 ## 引用
 

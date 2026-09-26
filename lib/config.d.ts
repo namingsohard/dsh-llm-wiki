@@ -57,37 +57,37 @@ export interface WikiConfig {
 }
 export declare const DEFAULT_CONFIG: WikiConfig;
 /** Schemastery configuration for the `wiki` plugin consumer. */
-export declare const Config: Schema<Schemastery.ObjectS<{
-    wikiRoot: Schema<string, string>;
-    searchLimit: Schema<number, number>;
-    includeSourcesInSearch: Schema<boolean, boolean>;
-    agingAfterDays: Schema<number, number>;
-    staleAfterDays: Schema<number, number>;
-    admissionMinAverage: Schema<number, number>;
-    admissionMinIndividual: Schema<number, number>;
-    maxPageBytes: Schema<number, number>;
-    maxInspectBytes: Schema<number, number>;
-    lintOrphans: Schema<boolean, boolean>;
-    mutationLog: Schema<boolean, boolean>;
-    approval: Schema<"staging" | "inline" | "off", "staging" | "inline" | "off">;
-    maxStagedBytes: Schema<number, number>;
-    nudge: Schema<"off" | "next-step" | "turn-end", "off" | "next-step" | "turn-end">;
-}>, Schemastery.ObjectT<{
-    wikiRoot: Schema<string, string>;
-    searchLimit: Schema<number, number>;
-    includeSourcesInSearch: Schema<boolean, boolean>;
-    agingAfterDays: Schema<number, number>;
-    staleAfterDays: Schema<number, number>;
-    admissionMinAverage: Schema<number, number>;
-    admissionMinIndividual: Schema<number, number>;
-    maxPageBytes: Schema<number, number>;
-    maxInspectBytes: Schema<number, number>;
-    lintOrphans: Schema<boolean, boolean>;
-    mutationLog: Schema<boolean, boolean>;
-    approval: Schema<"staging" | "inline" | "off", "staging" | "inline" | "off">;
-    maxStagedBytes: Schema<number, number>;
-    nudge: Schema<"off" | "next-step" | "turn-end", "off" | "next-step" | "turn-end">;
-}>>;
+export declare const Config: Schema<Schemastery.ObjectS<NoInfer<{
+    wikiRoot: Schema<string, string, "defined">;
+    searchLimit: Schema<number, number, "defined">;
+    includeSourcesInSearch: Schema<boolean, boolean, "defined">;
+    agingAfterDays: Schema<number, number, "defined">;
+    staleAfterDays: Schema<number, number, "defined">;
+    admissionMinAverage: Schema<number, number, "defined">;
+    admissionMinIndividual: Schema<number, number, "defined">;
+    maxPageBytes: Schema<number, number, "defined">;
+    maxInspectBytes: Schema<number, number, "defined">;
+    lintOrphans: Schema<boolean, boolean, "defined">;
+    mutationLog: Schema<boolean, boolean, "defined">;
+    approval: Schema<"staging" | "inline" | "off", "staging" | "inline" | "off", "defined">;
+    maxStagedBytes: Schema<number, number, "defined">;
+    nudge: Schema<"off" | "next-step" | "turn-end", "off" | "next-step" | "turn-end", "defined">;
+}>>, Schemastery.ObjectT<NoInfer<{
+    wikiRoot: Schema<string, string, "defined">;
+    searchLimit: Schema<number, number, "defined">;
+    includeSourcesInSearch: Schema<boolean, boolean, "defined">;
+    agingAfterDays: Schema<number, number, "defined">;
+    staleAfterDays: Schema<number, number, "defined">;
+    admissionMinAverage: Schema<number, number, "defined">;
+    admissionMinIndividual: Schema<number, number, "defined">;
+    maxPageBytes: Schema<number, number, "defined">;
+    maxInspectBytes: Schema<number, number, "defined">;
+    lintOrphans: Schema<boolean, boolean, "defined">;
+    mutationLog: Schema<boolean, boolean, "defined">;
+    approval: Schema<"staging" | "inline" | "off", "staging" | "inline" | "off", "defined">;
+    maxStagedBytes: Schema<number, number, "defined">;
+    nudge: Schema<"off" | "next-step" | "turn-end", "off" | "next-step" | "turn-end", "defined">;
+}>>, "plain">;
 /** Fill defaults and normalize inter-field constraints. */
 export declare function resolveConfig(config?: Partial<WikiConfig> | undefined): WikiConfig;
 /** Expand `~`, `~/`, `~\` against the OS home. */

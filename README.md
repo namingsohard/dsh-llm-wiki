@@ -39,6 +39,22 @@ Expect a `# == dsh-llm-wiki` layer containing `- id: wiki`. Then restart the app
 
 **Verify:** start a session and ask *"What does the wiki know about X?"* A working install calls `wiki_search` and reports `coverage: none` on a fresh wiki; the skeleton (`index.md`, `concepts/`, …) appears under `~/.dsh/wiki` on first start.
 
+## Host compatibility
+
+Checked against **dsh 0.1.5-rc.1 through 0.1.7-rc.2**. Whether a host loads this plugin at all is decided by `dsh-app-boot`: it takes every `@deepseek-ai/dsh*` key in `peerDependencies` and runs `semver.satisfies(hostVersion, range, { includePrerelease: true })`. One miss and the bundle is skipped — `Plugin dsh-llm-wiki@… is incompatible with dsh …` in the host log, and the plugin row disabled — with nothing else to explain why the tools never appeared. That is why the ranges are an explicit `||` list of releases this plugin has actually been run against, rather than a caret over versions nobody has tested: an honest "not yet" beats a silent claim.
+
+| host line | versions | note |
+| --- | --- | --- |
+| 0.1.5-rc.1 → 0.1.6-alpha.2 | rc.1, rc.2, rc.3, alpha.1, alpha.2 | session format **v3** |
+| 0.1.7-alpha.1 → 0.1.7-rc.2 | alpha.1, alpha.2, rc.1, rc.2 | session format **v4** |
+
+What 0.1.7 changed for a plugin like this one, and what the code does about it:
+
+- **Session format v4** retired the `{ kind: 'plugin', plugin: <name> }` message source: appending one is refused with *"format v4 message requires a producer-owned source kind"*, and the v3→v4 migration rewrites old rows of unknown producers to `plugin:<name>`. The nudge therefore signs its reminder as `plugin:dsh-llm-wiki` — valid on v4, valid on v3 (which only requires a non-empty `kind`), and identical to what its own pre-v4 reminders become after migration.
+- **Observation moved off the waterfall.** The turn counters now ride `tools/result` (an emit over the frozen outcome, listener failures contained by the harness) instead of `tools/post-execute`, so a wiki observer can never sit in the path of a tool decision. Folded `agent/pre-step` decisions are spread rather than rebuilt, so decision fields newer than this plugin survive.
+
+Everything else this plugin touches — `defineTool`, the `user-approval` request shape, `agent/pre-step`, `webServer.register`, `ctx.get('connection', false).requestRejection`, the sidebar-right tab seats, the client manifest — is declared identically across the whole range. `test/compat.test.ts` fails if the manifest and the tested list drift apart; adding a host release means appending it there and to both peer ranges.
+
 ## Configuration
 
 Optional, under the `wiki` key in `~/.dsh/settings.yaml` (defaults shown):
@@ -82,7 +98,7 @@ src/
 └── tools/                    the seven model-facing tools
 client/wiki-client.js         hand-written browser bundle (sidebar Wiki tab)
 prompts/                      router / extraction / mutation / validation playbooks
-test/                         vitest suites (112 tests)
+test/                         vitest suites (132 tests, incl. the host-compatibility contract)
 ```
 
 Deep design notes (why link-only sources, why the resident prompt is byte-stable, why the nudge rides the next step) live in `DSH-Wiki_Project_Blueprint.md` and the playbooks under `prompts/`.
@@ -93,10 +109,12 @@ Deep design notes (why link-only sources, why the resident prompt is byte-stable
 pnpm install
 pnpm build        # tsc -> lib/ (committed; DSH loads it directly)
 pnpm typecheck
-pnpm test         # vitest, 112 tests
+pnpm test         # vitest, 132 tests
 pnpm smoke        # end-to-end passes against the built artifact
 pnpm prompt:size  # guard the resident-prompt byte budget
 ```
+
+`pnpm-workspace.yaml` pins `nodeLinker: hoisted`. The harness `import()`s `lib/index.js` from outside this tree, and `pnpm smoke` does the same; the default isolated layout hides the harness peers behind junctions Node's ESM resolver will not walk back out of, so a flat tree is what makes the built artifact loadable the way the host loads it.
 
 ## References
 

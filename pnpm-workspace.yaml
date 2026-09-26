@@ -1,2 +1,12 @@
 allowBuilds:
   esbuild: true
+
+# The harness loads this plugin with plain `import()` from OUTSIDE our own tree
+# (and `pnpm smoke` does the same), so every module the built artifact reaches —
+# including the harness packages we peer on, which reach THEIR peers — has to be
+# resolvable the ordinary way. pnpm's default isolated layout hides those behind
+# junctions that Node's ESM resolver does not walk back out of
+# (`ERR_MODULE_NOT_FOUND: @deepseek-ai/dsh-scope`), and hoisting just the
+# `@deepseek-ai` scope recurses (ERR_PNPM_SYMLINK_FAILED). A flat tree is both
+# what the host profile looks like and what plain resolution expects.
+nodeLinker: hoisted

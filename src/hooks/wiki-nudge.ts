@@ -10,15 +10,16 @@ import type { WikiPromptStats } from '../prompt.js';
  * Why the next step. The resident prompt already says "wiki-first", and a
  * prompt is the weakest constraint in the system: under load the model skips
  * it. This module is the enforcement a prompt cannot be. It listens on
- * `tools/post-execute` to observe what the turn did (never blocking, never
- * rewriting), and on `agent/pre-step`, whose `enter` decision carries the
- * messages about to be handed to the model. Appending there is what the
- * official context-injecting plugins do, it costs no extra step, and the turn
- * is never extended — so the user-facing answer stays the last message of the
- * turn. The placement is natural: every web tool call is followed by another
- * step (only a tool declaring `concludesTurn` ends a turn early, and
- * `web_search` / `web_fetch` do not), and that step is exactly where the model
- * reads the results and starts composing.
+ * `tools/result` to observe what the turn did (an emit: never blocking, never
+ * rewriting, and the harness contains a throwing listener), and on
+ * `agent/pre-step`, whose `enter` decision carries the messages about to be
+ * handed to the model. Appending there is what the official context-injecting
+ * plugins do, it costs no extra step, and the turn is never extended — so the
+ * user-facing answer stays the last message of the turn. The placement is
+ * natural: every web tool call is followed by another step (only a tool
+ * declaring `concludesTurn` ends a turn early, and `web_search` / `web_fetch` do
+ * not), and that step is exactly where the model reads the results and starts
+ * composing.
  *
  * Why not the turn boundary. The previous design listened on
  * `agent/turn-stopping` and delivered with `agent.steer()`. That fires *after*
@@ -35,6 +36,12 @@ import type { WikiPromptStats } from '../prompt.js';
  * model's attention on the same sentence twelve times. What actually matters
  * is that the knowledge gets written eventually, so one reminder per turn,
  * placed where the model still has steps left to act, covers the whole burst.
+ *
+ * Host compatibility (the versions `package.json` peers admit): `tools/result`,
+ * `agent/pre-step`, `subagent/start` and the `{ id, role, content, source }`
+ * message shape are declared identically from 0.1.5-rc.1 through 0.1.7-rc.2, so
+ * this module needs no version branching — with one exception, the message
+ * `source`, which session format v4 tightened; see {@link NUDGE_SOURCE_KIND}.
  *
  * Position in the pre-step waterfall: we `await next()` first and append to
  * the decision the listeners behind us produced. They keep the power to veto
@@ -62,21 +69,36 @@ export const WEB_TOOL_NAMES: readonly string[] = ['web_search', 'web_fetch'];
 const PLUGIN_NAME = 'dsh-llm-wiki';
 
 /**
+ * The durable producer kind stamped on every reminder.
+ *
+ * Session format v4 (`dsh` 0.1.7-alpha.1 and later) retired the
+ * `{ kind: 'plugin', plugin: <name> }` wrapper: `dsh-session-format-v3-to-v4`
+ * refuses it on the append path — "format v4 message requires a producer-owned
+ * source kind" — and lifts legacy rows of producers it does not know to
+ * `plugin:<name>`. So `plugin:dsh-llm-wiki` is what v4 wants *and* what our own
+ * pre-v4 reminders become when a host migrates a session, which keeps old and
+ * new rows attributed identically. The v3 hosts in the supported range
+ * (0.1.5-rc.1 … 0.1.6-alpha.2) only require a non-empty `kind` string on a
+ * `user/message`, so this single spelling is valid across the whole range.
+ */
+export const NUDGE_SOURCE_KIND = `plugin:${PLUGIN_NAME}`;
+
+/**
  * The message shape the harness accepts in `agent/pre-step`'s `enter.messages`
  * — `{ id, role, content, source }`, built structurally because the harness
  * module that mints these (`@deepseek-ai/dsh-llm`) is not a dependency of this
  * plugin. The bundled `dsh-repeat-tool-reminder` plugin carries its own copy of
- * the same helper. `source.kind: 'plugin'` + `form: 'notice'` is what makes the
- * reminder a plugin-signed notice in the UI rather than a fake user turn.
+ * the same helper. `source.kind` + `form: 'notice'` is what makes the reminder a
+ * plugin-signed notice in the UI rather than a fake user turn.
  */
 export interface NudgeMessage {
   readonly id: string;
   readonly role: 'user';
   readonly content: readonly { readonly type: 'text'; readonly text: string }[];
+  /** Producer attribution — see {@link NUDGE_SOURCE_KIND} for why `kind` is not `'plugin'`. */
   readonly source: {
-    readonly kind: 'plugin';
-    readonly plugin: string;
-    readonly form: string;
+    readonly kind: string;
+    readonly form: 'notice';
     readonly summary: string;
   };
 }
@@ -92,7 +114,7 @@ export interface NudgeLogger {
   warn?: (message: string, ...args: unknown[]) => void;
 }
 
-interface PostExecutePayload {
+interface ToolResultPayload {
   readonly name?: unknown;
   readonly agent?: unknown;
 }
@@ -144,8 +166,8 @@ export interface NudgeWatcher {
    * to add, so other listeners' decisions are never disturbed.
    */
   onPreStep(payload: TurnPayload | undefined, downstream: EnterDecision | undefined): EnterDecision | undefined;
-  /** `tools/post-execute`: record which side of the fence this call was on. */
-  onPostExecute(exec: PostExecutePayload | undefined): void;
+  /** `tools/result`: record which side of the fence this call was on. */
+  onToolResult(exec: ToolResultPayload | undefined): void;
   /** Inspect the counters for one agent (tests and diagnostics). */
   peek(agent: NudgeAgent): WatchSnapshot | undefined;
 }
@@ -172,9 +194,8 @@ function buildMessage(text: string): NudgeMessage {
     role: 'user' as const,
     content: Object.freeze([{ type: 'text' as const, text }]),
     source: Object.freeze({
-      kind: 'plugin' as const,
-      plugin: PLUGIN_NAME,
-      form: 'notice',
+      kind: NUDGE_SOURCE_KIND,
+      form: 'notice' as const,
       summary: 'wiki-first reminder',
     }),
   });
@@ -246,12 +267,12 @@ export function createNudgeWatcher(options: NudgeWatcherOptions): NudgeWatcher {
     const reminder = buildMessage(renderNudge(watch.web, options.stats));
     // Never mutate the downstream batch — the harness freezes what it publishes.
     const messages = [...(downstream.messages ?? []), reminder];
-    return downstream.startsRequestSeries === true
-      ? { kind: 'enter', messages, startsRequestSeries: true }
-      : { kind: 'enter', messages };
+    // Spread the downstream decision and replace only its message batch, so a
+    // decision field newer than this plugin survives us.
+    return { ...downstream, messages };
   }
 
-  function onPostExecute(exec: PostExecutePayload | undefined): void {
+  function onToolResult(exec: ToolResultPayload | undefined): void {
     const agent = asAgent(exec?.agent);
     if (agent === undefined || typeof exec?.name !== 'string') return;
     const watch = watchFor(agent);
@@ -268,11 +289,11 @@ export function createNudgeWatcher(options: NudgeWatcherOptions): NudgeWatcher {
         return downstream;
       }
     },
-    onPostExecute: (exec) => {
+    onToolResult: (exec) => {
       try {
-        onPostExecute(exec);
+        onToolResult(exec);
       } catch (error) {
-        warn('post-execute observation failed', error);
+        warn('tool-result observation failed', error);
       }
     },
     peek: (agent) => {
@@ -326,9 +347,12 @@ export function registerNudgeHook(host: NudgeHost, mode: WikiNudgeMode, stats: W
   const watcher = createNudgeWatcher({ stats, logger: host.logger, excluded: subagents });
 
   disposers.push(
-    asDisposer(host.on('tools/post-execute', (exec: unknown, _result: unknown, next: unknown) => {
-      watcher.onPostExecute(exec as PostExecutePayload | undefined);
-      return typeof next === 'function' ? (next as () => unknown)() : undefined;
+    // Observation rides the emit, not the `tools/post-execute` waterfall: the
+    // counters are read-only interest in the outcome, and an emit keeps a
+    // throwing listener inside the harness's own containment instead of the
+    // step's decision path.
+    asDisposer(host.on('tools/result', (exec: unknown) => {
+      watcher.onToolResult(exec as ToolResultPayload | undefined);
     })),
     // Delegate to the listeners behind us first, then fold our context into
     // whatever decision they produced (see the module note on waterfall order).

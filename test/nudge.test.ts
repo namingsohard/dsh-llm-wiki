@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createNudgeWatcher,
+  NUDGE_SOURCE_KIND,
   registerNudgeHook,
   renderNudge,
   type EnterDecision,
@@ -12,8 +13,8 @@ import type { WikiPromptStats } from '../src/prompt.js';
 /**
  * The web-access nudge: observe the turn through the harness event seam, then
  * fold the reminder into the NEXT step's input so the answer the user gets
- * stays the last message of the turn. The harness is faked to its contract:
- * `tools/post-execute(exec, result, next)` and the `agent/pre-step` waterfall
+ * stays the last message of the turn. The harness is faked to its contract: the
+ * `tools/result(exec, result)` emit and the `agent/pre-step` waterfall
  * `(payload:{agent,turn,step}, next)`, whose `next()` resolves to the `enter`
  * decision the loop would otherwise hand to the model.
  */
@@ -57,8 +58,8 @@ describe('web-access nudge: turn accounting', () => {
     const { watcher } = makeWatcher({ pages: 7, pending: 0 });
     const agent = fakeAgent();
     watcher.onPreStep({ agent, turn: 1 }, undefined);
-    watcher.onPostExecute({ agent, name: 'web_search' });
-    watcher.onPostExecute({ agent, name: 'web_fetch' });
+    watcher.onToolResult({ agent, name: 'web_search' });
+    watcher.onToolResult({ agent, name: 'web_fetch' });
     const decision = watcher.onPreStep({ agent, turn: 1 }, enter());
 
     expect(decision?.kind).toBe('enter');
@@ -72,8 +73,8 @@ describe('web-access nudge: turn accounting', () => {
     const { watcher } = makeWatcher();
     const agent = fakeAgent();
     watcher.onPreStep({ agent, turn: 4 }, enter());
-    watcher.onPostExecute({ agent, name: 'web_search' });
-    watcher.onPostExecute({ agent, name: 'wiki_inspect' });
+    watcher.onToolResult({ agent, name: 'web_search' });
+    watcher.onToolResult({ agent, name: 'wiki_inspect' });
     expect(watcher.onPreStep({ agent, turn: 4 }, enter())!.messages).toHaveLength(0);
   });
 
@@ -81,7 +82,7 @@ describe('web-access nudge: turn accounting', () => {
     const { watcher } = makeWatcher();
     const agent = fakeAgent();
     watcher.onPreStep({ agent, turn: 2 }, enter());
-    watcher.onPostExecute({ agent, name: 'read' });
+    watcher.onToolResult({ agent, name: 'read' });
     expect(watcher.onPreStep({ agent, turn: 2 }, enter())!.messages).toHaveLength(0);
   });
 
@@ -89,7 +90,7 @@ describe('web-access nudge: turn accounting', () => {
     const { watcher } = makeWatcher();
     const agent = fakeAgent();
     watcher.onPreStep({ agent, turn: 9 }, enter());
-    watcher.onPostExecute({ agent, name: 'web_search' });
+    watcher.onToolResult({ agent, name: 'web_search' });
     expect(watcher.onPreStep({ agent, turn: 9 }, enter())!.messages).toHaveLength(1);
     expect(watcher.onPreStep({ agent, turn: 9 }, enter())!.messages).toHaveLength(0);
     expect(watcher.onPreStep({ agent, turn: 9 }, enter())!.messages).toHaveLength(0);
@@ -100,7 +101,7 @@ describe('web-access nudge: turn accounting', () => {
     const agent = fakeAgent();
 
     watcher.onPreStep({ agent, turn: 1 }, enter());
-    watcher.onPostExecute({ agent, name: 'web_search' });
+    watcher.onToolResult({ agent, name: 'web_search' });
     expect(watcher.onPreStep({ agent, turn: 1 }, enter())!.messages).toHaveLength(1);
 
     // Turn 2 does no research: no reminder, even though turn 1 was nudged.
@@ -108,7 +109,7 @@ describe('web-access nudge: turn accounting', () => {
     expect(watcher.onPreStep({ agent, turn: 2 }, enter())!.messages).toHaveLength(0);
     expect(watcher.peek(agent)).toMatchObject({ turn: 2, web: 0, wiki: false });
 
-    watcher.onPostExecute({ agent, name: 'web_search' });
+    watcher.onToolResult({ agent, name: 'web_search' });
     expect(watcher.onPreStep({ agent, turn: 2 }, enter())!.messages).toHaveLength(1);
     // The counters describe the turn; dedupe rides on nudgedTurn, not on wiping them.
     expect(watcher.peek(agent)).toMatchObject({ turn: 2, web: 1, wiki: false, nudgedTurn: 2 });
@@ -120,19 +121,25 @@ describe('web-access nudge: turn accounting', () => {
     const other = fakeAgent('other');
     watcher.onPreStep({ agent: main, turn: 1 }, enter());
     watcher.onPreStep({ agent: other, turn: 1 }, enter());
-    watcher.onPostExecute({ agent: other, name: 'web_search' });
+    watcher.onToolResult({ agent: other, name: 'web_search' });
     expect(watcher.onPreStep({ agent: main, turn: 1 }, enter())!.messages).toHaveLength(0);
     expect(watcher.onPreStep({ agent: other, turn: 1 }, enter())!.messages).toHaveLength(1);
   });
 
-  it('delivers a plugin-sourced user message the harness can accept', () => {
+  it('delivers a producer-sourced user message the harness can accept', () => {
     const { watcher } = makeWatcher();
     const agent = fakeAgent();
     watcher.onPreStep({ agent, turn: 1 }, enter());
-    watcher.onPostExecute({ agent, name: 'web_search' });
+    watcher.onToolResult({ agent, name: 'web_search' });
     const message = watcher.onPreStep({ agent, turn: 1 }, enter())!.messages![0]!;
     expect(message.role).toBe('user');
-    expect(message.source).toMatchObject({ kind: 'plugin', plugin: 'dsh-llm-wiki', form: 'notice' });
+    expect(message.source).toEqual({ kind: 'plugin:dsh-llm-wiki', form: 'notice', summary: 'wiki-first reminder' });
+    expect(message.source.kind).toBe(NUDGE_SOURCE_KIND);
+    // Session format v4 (dsh 0.1.7+) rejects `kind: 'plugin'` on the append path:
+    // "format v4 message requires a producer-owned source kind". The wrapper is
+    // gone for good — do not reintroduce it.
+    expect(message.source.kind).not.toBe('plugin');
+    expect(message.source).not.toHaveProperty('plugin');
     expect(message.content[0]!.type).toBe('text');
     expect(message.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-/);
   });
@@ -159,9 +166,9 @@ describe('web-access nudge: turn accounting', () => {
       expect(watcher.onPreStep({ turn: 1 }, entered)).toBe(entered);
       expect(watcher.onPreStep({ agent: { id: 42 as unknown as string }, turn: 1 }, entered)).toBe(entered);
       expect(watcher.onPreStep({ agent: fakeAgent(), turn: 1 }, undefined)).toBeUndefined();
-      watcher.onPostExecute(undefined);
-      watcher.onPostExecute({ name: 'web_search' }); // no agent
-      watcher.onPostExecute({ agent: { id: 'x' }, name: 42 as unknown as string });
+      watcher.onToolResult(undefined);
+      watcher.onToolResult({ name: 'web_search' }); // no agent
+      watcher.onToolResult({ agent: { id: 'x' }, name: 42 as unknown as string });
     }).not.toThrow();
     expect(logger.warn).not.toHaveBeenCalled();
   });
@@ -170,7 +177,7 @@ describe('web-access nudge: turn accounting', () => {
     const { watcher } = makeWatcher();
     const agent = fakeAgent();
     watcher.onPreStep({ agent, turn: 3 }, enter());
-    watcher.onPostExecute({ agent, name: 'web_search' });
+    watcher.onToolResult({ agent, name: 'web_search' });
 
     const rejected: EnterDecision = { kind: 'reject' };
     expect(watcher.onPreStep({ agent, turn: 3 }, rejected)).toBe(rejected);
@@ -182,11 +189,12 @@ describe('web-access nudge: turn accounting', () => {
     const { watcher } = makeWatcher();
     const agent = fakeAgent();
     watcher.onPreStep({ agent, turn: 6 }, enter());
-    watcher.onPostExecute({ agent, name: 'web_search' });
+    watcher.onToolResult({ agent, name: 'web_search' });
 
     const batch: NudgeMessage[] = [];
     Object.freeze(batch);
-    const decision = watcher.onPreStep({ agent, turn: 6 }, { kind: 'enter', messages: batch, startsRequestSeries: true });
+    // A field newer than this plugin must survive the fold untouched.
+    const decision = watcher.onPreStep({ agent, turn: 6 }, { kind: 'enter', messages: batch, startsRequestSeries: true } as EnterDecision);
     expect(decision?.kind).toBe('enter');
     expect(decision?.startsRequestSeries).toBe(true);
     expect(decision!.messages).toHaveLength(1);
@@ -195,12 +203,12 @@ describe('web-access nudge: turn accounting', () => {
     // What other listeners folded in keeps its place; the reminder lands last.
     const second = fakeAgent('second');
     watcher.onPreStep({ agent: second, turn: 6 }, enter());
-    watcher.onPostExecute({ agent: second, name: 'web_search' });
+    watcher.onToolResult({ agent: second, name: 'web_search' });
     const theirs: NudgeMessage = {
       id: 'theirs',
       role: 'user',
       content: [{ type: 'text', text: 'from another plugin' }],
-      source: { kind: 'plugin', plugin: 'other', form: 'notice', summary: 'other' },
+      source: { kind: 'plugin:other-plugin', form: 'notice', summary: 'other' },
     };
     const stacked = watcher.onPreStep({ agent: second, turn: 6 }, { kind: 'enter', messages: Object.freeze([theirs]) });
     expect(stacked!.messages).toHaveLength(2);
@@ -216,23 +224,35 @@ describe('web-access nudge: harness wiring', () => {
     expect([...host.handlers.keys()].sort()).toEqual([
       'agent/pre-step',
       'subagent/start',
-      'tools/post-execute',
+      'tools/result',
     ]);
 
-    const downstream = { kind: 'accept', value: { ok: true } };
-    const returned = await host.handlers.get('tools/post-execute')!({ name: 'web_search', agent: fakeAgent() }, {}, async () => downstream);
-    expect(returned).toBe(downstream);
+    // `tools/result` is an emit: pure observation, no decision to hand back.
+    const observed = host.handlers.get('tools/result')!({ name: 'web_search', agent: fakeAgent() }, { content: [] });
+    expect(observed).toBeUndefined();
 
     const agent = fakeAgent();
     const entered = enter();
     await host.handlers.get('agent/pre-step')!({ agent, turn: 1 }, async () => entered);
-    await host.handlers.get('tools/post-execute')!({ agent, name: 'web_search' }, {}, async () => downstream);
+    host.handlers.get('tools/result')!({ agent, name: 'web_search' }, { content: [] });
 
     const decision = (await host.handlers.get('agent/pre-step')!({ agent, turn: 1 }, async () => entered)) as EnterDecision;
     expect(decision.kind).toBe('enter');
     expect(decision).not.toBe(entered); // built from the downstream decision, not returned raw
     expect(decision.messages).toHaveLength(1);
     expect(entered.messages).toHaveLength(0);
+  });
+
+  it('carries an unknown downstream decision field through the fold', async () => {
+    const host = fakeHost();
+    registerNudgeHook(host, 'next-step', EMPTY);
+    const agent = fakeAgent();
+    await host.handlers.get('agent/pre-step')!({ agent, turn: 1 }, async () => enter());
+    host.handlers.get('tools/result')!({ agent, name: 'web_search' }, { content: [] });
+    const future = { kind: 'enter', messages: [], someFutureField: 42 } as unknown as EnterDecision;
+    const decision = (await host.handlers.get('agent/pre-step')!({ agent, turn: 1 }, async () => future)) as unknown as Record<string, unknown>;
+    expect(decision.someFutureField).toBe(42);
+    expect(decision.messages).toHaveLength(1);
   });
 
   it('registers nothing at all when the nudge is off', () => {
@@ -250,7 +270,7 @@ describe('web-access nudge: harness wiring', () => {
     const entered = enter();
     host.handlers.get('subagent/start')!({ id: 'run-7', runId: 'run-7' });
     await host.handlers.get('agent/pre-step')!({ agent: child, turn: 1 }, async () => entered);
-    await host.handlers.get('tools/post-execute')!({ agent: child, name: 'web_search' }, {}, () => undefined);
+    host.handlers.get('tools/result')!({ agent: child, name: 'web_search' }, { content: [] });
     const decision = await host.handlers.get('agent/pre-step')!({ agent: child, turn: 1 }, async () => entered);
     expect(decision).toBe(entered); // excluded: the downstream decision passes through untouched
   });

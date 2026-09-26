@@ -221,11 +221,12 @@ const GOOD = { reusability: 3, stability: 3, novelty: 2, abstraction: 3 };
   try {
     assert.deepEqual(
       [...wiki.handlers.keys()].sort(),
-      ['agent/pre-step', 'subagent/start', 'tools/post-execute'],
-      'the nudge observes the step boundary and the tool pipeline, never the turn boundary',
+      ['agent/pre-step', 'subagent/start', 'tools/result'],
+      'the nudge observes the step boundary and the settled tool outcome, never the turn boundary',
     );
     const preStep = wiki.handlers.get('agent/pre-step');
-    const post = wiki.handlers.get('tools/post-execute');
+    // `tools/result` is an emit over the frozen outcome: no `next`, no decision.
+    const result = wiki.handlers.get('tools/result');
     const agent = { id: 'researcher' };
     // One and the same decision object is handed in every time: the fold must
     // never mutate it, and a broken implementation would grow this batch.
@@ -233,21 +234,22 @@ const GOOD = { reusability: 3, stability: 3, novelty: 2, abstraction: 3 };
 
     // quiet turn: reads only → no reminder folded in
     await preStep({ agent, turn: 1 }, async () => enter);
-    await post({ agent, name: 'read' }, {}, async () => ({ kind: 'accept' }));
+    assert.equal(result({ agent, name: 'read' }, { content: [] }), undefined, 'observation returns nothing');
     let decision = await preStep({ agent, turn: 1 }, async () => enter);
     assert.equal(decision.messages.length, 0, 'a turn that never searched the web gets no reminder');
 
     // research turn that skipped the wiki: one reminder on the NEXT step, turn not extended
-    await post({ agent, name: 'web_search' }, {}, async () => ({ kind: 'accept' }));
-    await post({ agent, name: 'web_fetch' }, {}, async () => ({ kind: 'accept' }));
+    result({ agent, name: 'web_search' }, { content: [] });
+    result({ agent, name: 'web_fetch' }, { content: [] });
     decision = await preStep({ agent, turn: 1 }, async () => enter);
     assert.equal(decision.messages.length, 1, 'one reminder folded into the next step');
     assert.match(decision.messages[0].content[0].text, /2 web call\(s\)/, 'the reminder counts the web calls');
     assert.match(decision.messages[0].content[0].text, /wiki_search/, 'the reminder names the call to make');
     assert.equal(decision.messages[0].role, 'user');
-    assert.equal(decision.messages[0].source.kind, 'plugin', 'the reminder is plugin-sourced, not a fake user turn');
-    assert.equal(decision.messages[0].source.plugin, 'dsh-llm-wiki');
+    // Session format v4 (dsh 0.1.7+) refuses `kind: 'plugin'` on the append path.
+    assert.equal(decision.messages[0].source.kind, 'plugin:dsh-llm-wiki', 'the reminder is producer-sourced, not a fake user turn');
     assert.equal(decision.messages[0].source.form, 'notice');
+    assert.ok(!('plugin' in decision.messages[0].source), 'no retired `plugin` wrapper field');
     assert.equal(enter.messages.length, 0, 'the downstream batch is never mutated in place');
 
     // …and never a second time in the same turn
@@ -263,14 +265,15 @@ const GOOD = { reusability: 3, stability: 3, novelty: 2, abstraction: 3 };
     // (note the order: pre-step first to establish the turn, then the tool calls)
     const second = { id: 'second' };
     await preStep({ agent: second, turn: 3 }, async () => enter);
-    await post({ agent: second, name: 'web_search' }, {}, async () => ({ kind: 'accept' }));
-    await post({ agent: second, name: 'wiki_search' }, {}, async () => ({ kind: 'accept' }));
+    result({ agent: second, name: 'web_search' }, { content: [] });
+    result({ agent: second, name: 'wiki_search' }, { content: [] });
     decision = await preStep({ agent: second, turn: 3 }, async () => enter);
     assert.equal(decision.messages.length, 0, 'a turn that touched the wiki earns silence');
 
-    // Observation must never swallow the tool decision.
-    const downstream = { kind: 'accept', value: { ok: true } };
-    assert.equal(await post({ agent, name: 'read' }, {}, async () => downstream), downstream);
+    // Observation never disturbs the step: a foreign decision comes back as built.
+    const foreign = { kind: 'enter', messages: [], someFutureField: 'passthrough' };
+    const carried = await preStep({ agent: { id: 'quiet' }, turn: 9 }, async () => foreign);
+    assert.equal(carried.someFutureField, 'passthrough', 'unknown decision fields survive the fold');
   } finally {
     await rm(wiki.root, { recursive: true, force: true });
   }

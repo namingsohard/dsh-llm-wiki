@@ -21,37 +21,37 @@ export declare const name = "wiki";
 /** Services this plugin consumes from the harness. */
 export declare const inject: string[];
 /** Schemastery config schema surfaced to DSH settings. */
-export declare const Config: import("@deepseek-ai/schemastery").default<Schemastery.ObjectS<{
-    wikiRoot: import("@deepseek-ai/schemastery").default<string, string>;
-    searchLimit: import("@deepseek-ai/schemastery").default<number, number>;
-    includeSourcesInSearch: import("@deepseek-ai/schemastery").default<boolean, boolean>;
-    agingAfterDays: import("@deepseek-ai/schemastery").default<number, number>;
-    staleAfterDays: import("@deepseek-ai/schemastery").default<number, number>;
-    admissionMinAverage: import("@deepseek-ai/schemastery").default<number, number>;
-    admissionMinIndividual: import("@deepseek-ai/schemastery").default<number, number>;
-    maxPageBytes: import("@deepseek-ai/schemastery").default<number, number>;
-    maxInspectBytes: import("@deepseek-ai/schemastery").default<number, number>;
-    lintOrphans: import("@deepseek-ai/schemastery").default<boolean, boolean>;
-    mutationLog: import("@deepseek-ai/schemastery").default<boolean, boolean>;
-    approval: import("@deepseek-ai/schemastery").default<"staging" | "inline" | "off", "staging" | "inline" | "off">;
-    maxStagedBytes: import("@deepseek-ai/schemastery").default<number, number>;
-    nudge: import("@deepseek-ai/schemastery").default<"off" | "next-step" | "turn-end", "off" | "next-step" | "turn-end">;
-}>, Schemastery.ObjectT<{
-    wikiRoot: import("@deepseek-ai/schemastery").default<string, string>;
-    searchLimit: import("@deepseek-ai/schemastery").default<number, number>;
-    includeSourcesInSearch: import("@deepseek-ai/schemastery").default<boolean, boolean>;
-    agingAfterDays: import("@deepseek-ai/schemastery").default<number, number>;
-    staleAfterDays: import("@deepseek-ai/schemastery").default<number, number>;
-    admissionMinAverage: import("@deepseek-ai/schemastery").default<number, number>;
-    admissionMinIndividual: import("@deepseek-ai/schemastery").default<number, number>;
-    maxPageBytes: import("@deepseek-ai/schemastery").default<number, number>;
-    maxInspectBytes: import("@deepseek-ai/schemastery").default<number, number>;
-    lintOrphans: import("@deepseek-ai/schemastery").default<boolean, boolean>;
-    mutationLog: import("@deepseek-ai/schemastery").default<boolean, boolean>;
-    approval: import("@deepseek-ai/schemastery").default<"staging" | "inline" | "off", "staging" | "inline" | "off">;
-    maxStagedBytes: import("@deepseek-ai/schemastery").default<number, number>;
-    nudge: import("@deepseek-ai/schemastery").default<"off" | "next-step" | "turn-end", "off" | "next-step" | "turn-end">;
-}>>;
+export declare const Config: import("@deepseek-ai/schemastery").default<Schemastery.ObjectS<NoInfer<{
+    wikiRoot: import("@deepseek-ai/schemastery").default<string, string, "defined">;
+    searchLimit: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    includeSourcesInSearch: import("@deepseek-ai/schemastery").default<boolean, boolean, "defined">;
+    agingAfterDays: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    staleAfterDays: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    admissionMinAverage: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    admissionMinIndividual: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    maxPageBytes: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    maxInspectBytes: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    lintOrphans: import("@deepseek-ai/schemastery").default<boolean, boolean, "defined">;
+    mutationLog: import("@deepseek-ai/schemastery").default<boolean, boolean, "defined">;
+    approval: import("@deepseek-ai/schemastery").default<"staging" | "inline" | "off", "staging" | "inline" | "off", "defined">;
+    maxStagedBytes: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    nudge: import("@deepseek-ai/schemastery").default<"off" | "next-step" | "turn-end", "off" | "next-step" | "turn-end", "defined">;
+}>>, Schemastery.ObjectT<NoInfer<{
+    wikiRoot: import("@deepseek-ai/schemastery").default<string, string, "defined">;
+    searchLimit: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    includeSourcesInSearch: import("@deepseek-ai/schemastery").default<boolean, boolean, "defined">;
+    agingAfterDays: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    staleAfterDays: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    admissionMinAverage: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    admissionMinIndividual: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    maxPageBytes: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    maxInspectBytes: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    lintOrphans: import("@deepseek-ai/schemastery").default<boolean, boolean, "defined">;
+    mutationLog: import("@deepseek-ai/schemastery").default<boolean, boolean, "defined">;
+    approval: import("@deepseek-ai/schemastery").default<"staging" | "inline" | "off", "staging" | "inline" | "off", "defined">;
+    maxStagedBytes: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    nudge: import("@deepseek-ai/schemastery").default<"off" | "next-step" | "turn-end", "off" | "next-step" | "turn-end", "defined">;
+}>>, "plain">;
 export type Config = WikiConfig;
 export { resolveConfig, resolveWikiRoot } from './config.js';
 export { WikiStore } from './storage/markdown-store.js';

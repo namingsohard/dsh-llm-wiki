@@ -8,15 +8,16 @@ import type { WikiPromptStats } from '../prompt.js';
  * Why the next step. The resident prompt already says "wiki-first", and a
  * prompt is the weakest constraint in the system: under load the model skips
  * it. This module is the enforcement a prompt cannot be. It listens on
- * `tools/post-execute` to observe what the turn did (never blocking, never
- * rewriting), and on `agent/pre-step`, whose `enter` decision carries the
- * messages about to be handed to the model. Appending there is what the
- * official context-injecting plugins do, it costs no extra step, and the turn
- * is never extended — so the user-facing answer stays the last message of the
- * turn. The placement is natural: every web tool call is followed by another
- * step (only a tool declaring `concludesTurn` ends a turn early, and
- * `web_search` / `web_fetch` do not), and that step is exactly where the model
- * reads the results and starts composing.
+ * `tools/result` to observe what the turn did (an emit: never blocking, never
+ * rewriting, and the harness contains a throwing listener), and on
+ * `agent/pre-step`, whose `enter` decision carries the messages about to be
+ * handed to the model. Appending there is what the official context-injecting
+ * plugins do, it costs no extra step, and the turn is never extended — so the
+ * user-facing answer stays the last message of the turn. The placement is
+ * natural: every web tool call is followed by another step (only a tool
+ * declaring `concludesTurn` ends a turn early, and `web_search` / `web_fetch` do
+ * not), and that step is exactly where the model reads the results and starts
+ * composing.
  *
  * Why not the turn boundary. The previous design listened on
  * `agent/turn-stopping` and delivered with `agent.steer()`. That fires *after*
@@ -34,6 +35,12 @@ import type { WikiPromptStats } from '../prompt.js';
  * is that the knowledge gets written eventually, so one reminder per turn,
  * placed where the model still has steps left to act, covers the whole burst.
  *
+ * Host compatibility (the versions `package.json` peers admit): `tools/result`,
+ * `agent/pre-step`, `subagent/start` and the `{ id, role, content, source }`
+ * message shape are declared identically from 0.1.5-rc.1 through 0.1.7-rc.2, so
+ * this module needs no version branching — with one exception, the message
+ * `source`, which session format v4 tightened; see {@link NUDGE_SOURCE_KIND}.
+ *
  * Position in the pre-step waterfall: we `await next()` first and append to
  * the decision the listeners behind us produced. They keep the power to veto
  * or rewrite the step; we only ever add to their result and they do not see
@@ -47,12 +54,26 @@ export declare const WIKI_TOOL_NAMES: readonly string[];
 /** Tools that mean "the answer came from outside the wiki". */
 export declare const WEB_TOOL_NAMES: readonly string[];
 /**
+ * The durable producer kind stamped on every reminder.
+ *
+ * Session format v4 (`dsh` 0.1.7-alpha.1 and later) retired the
+ * `{ kind: 'plugin', plugin: <name> }` wrapper: `dsh-session-format-v3-to-v4`
+ * refuses it on the append path — "format v4 message requires a producer-owned
+ * source kind" — and lifts legacy rows of producers it does not know to
+ * `plugin:<name>`. So `plugin:dsh-llm-wiki` is what v4 wants *and* what our own
+ * pre-v4 reminders become when a host migrates a session, which keeps old and
+ * new rows attributed identically. The v3 hosts in the supported range
+ * (0.1.5-rc.1 … 0.1.6-alpha.2) only require a non-empty `kind` string on a
+ * `user/message`, so this single spelling is valid across the whole range.
+ */
+export declare const NUDGE_SOURCE_KIND = "plugin:dsh-llm-wiki";
+/**
  * The message shape the harness accepts in `agent/pre-step`'s `enter.messages`
  * — `{ id, role, content, source }`, built structurally because the harness
  * module that mints these (`@deepseek-ai/dsh-llm`) is not a dependency of this
  * plugin. The bundled `dsh-repeat-tool-reminder` plugin carries its own copy of
- * the same helper. `source.kind: 'plugin'` + `form: 'notice'` is what makes the
- * reminder a plugin-signed notice in the UI rather than a fake user turn.
+ * the same helper. `source.kind` + `form: 'notice'` is what makes the reminder a
+ * plugin-signed notice in the UI rather than a fake user turn.
  */
 export interface NudgeMessage {
     readonly id: string;
@@ -61,10 +82,10 @@ export interface NudgeMessage {
         readonly type: 'text';
         readonly text: string;
     }[];
+    /** Producer attribution — see {@link NUDGE_SOURCE_KIND} for why `kind` is not `'plugin'`. */
     readonly source: {
-        readonly kind: 'plugin';
-        readonly plugin: string;
-        readonly form: string;
+        readonly kind: string;
+        readonly form: 'notice';
         readonly summary: string;
     };
 }
@@ -77,7 +98,7 @@ export interface NudgeLogger {
     info?: (message: string, ...args: unknown[]) => void;
     warn?: (message: string, ...args: unknown[]) => void;
 }
-interface PostExecutePayload {
+interface ToolResultPayload {
     readonly name?: unknown;
     readonly agent?: unknown;
 }
@@ -112,8 +133,8 @@ export interface NudgeWatcher {
      * to add, so other listeners' decisions are never disturbed.
      */
     onPreStep(payload: TurnPayload | undefined, downstream: EnterDecision | undefined): EnterDecision | undefined;
-    /** `tools/post-execute`: record which side of the fence this call was on. */
-    onPostExecute(exec: PostExecutePayload | undefined): void;
+    /** `tools/result`: record which side of the fence this call was on. */
+    onToolResult(exec: ToolResultPayload | undefined): void;
     /** Inspect the counters for one agent (tests and diagnostics). */
     peek(agent: NudgeAgent): WatchSnapshot | undefined;
 }
