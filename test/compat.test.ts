@@ -51,6 +51,9 @@ export const SUPPORTED_HOSTS: readonly string[] = [
   '0.1.7-alpha.2',
   '0.1.7-rc.1',
   '0.1.7-rc.2',
+  '0.2.0-rc.1',
+  '0.2.0-rc.2',
+  '0.2.1-alpha.1',
 ];
 
 /** The peers the host gate inspects: `@deepseek-ai/dsh` and `@deepseek-ai/dsh-*`. */
@@ -90,7 +93,9 @@ describe('host compatibility contract', () => {
   }
 
   it('does not claim hosts nobody has run it on', () => {
-    for (const future of ['0.1.4-rc.1', '0.1.8-alpha.1', '0.2.0-alpha.1']) {
+    // 0.2.1 (stable) is deliberately absent: only the published 0.2.x runtimes
+    // above have been seam-checked, and a stable release must earn its token.
+    for (const future of ['0.1.4-rc.1', '0.1.8-alpha.1', '0.2.0-alpha.1', '0.2.1', '0.3.0-alpha.1']) {
       for (const [name, range] of gatedPeers) {
         expect(admits(range, future), `${name} must NOT claim ${future}`).toBe(false);
       }

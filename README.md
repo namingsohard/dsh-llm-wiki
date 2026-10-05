@@ -42,14 +42,15 @@ Expect a `# == dsh-llm-wiki` layer containing `- id: wiki`. Then restart the app
 
 ## Host compatibility
 
-Checked against **dsh 0.1.5-rc.1 through 0.1.7-rc.2**. Whether a host loads this plugin at all is decided by `dsh-app-boot`: it takes every `@deepseek-ai/dsh*` key in `peerDependencies` and runs `semver.satisfies(hostVersion, range, { includePrerelease: true })`. One miss and the bundle is skipped — `Plugin dsh-llm-wiki@… is incompatible with dsh …` in the host log, and the plugin row disabled — with nothing else to explain why the tools never appeared. That is why the ranges are an explicit `||` list of releases this plugin has actually been run against, rather than a caret over versions nobody has tested: an honest "not yet" beats a silent claim.
+Checked against **dsh 0.1.5-rc.1 through 0.2.1-alpha.1**. Whether a host loads this plugin at all is decided by `dsh-app-boot`: it takes every `@deepseek-ai/dsh*` key in `peerDependencies` and runs `semver.satisfies(hostVersion, range, { includePrerelease: true })`. One miss and the bundle is skipped — `Plugin dsh-llm-wiki@… is incompatible with dsh …` in the host log, and the plugin row disabled — with nothing else to explain why the tools never appeared. That is why the ranges are an explicit `||` list of releases this plugin has actually been run against, rather than a caret over versions nobody has tested: an honest "not yet" beats a silent claim. (0.2.x hosts additionally accept an exact-version exemption via `dsh plugin allow-version` / the profile's `compatibility.json`; reaching for it instead of widening the list above is how a plugin ends up running on a host nobody checked.)
 
 | host line | versions | note |
 | --- | --- | --- |
 | 0.1.5-rc.1 → 0.1.6-alpha.2 | rc.1, rc.2, rc.3, alpha.1, alpha.2 | session format **v3** |
 | 0.1.7-alpha.1 → 0.1.7-rc.2 | alpha.1, alpha.2, rc.1, rc.2 | session format **v4** |
+| 0.2.0-rc.1 → 0.2.1-alpha.1 | rc.1, rc.2, alpha.1 | session format **v4**; no seam changes — the gate, the events, and the seats below are byte-identical to 0.1.7-rc.2 |
 
-What 0.1.7 changed for a plugin like this one, and what the code does about it:
+What 0.1.7 changed for a plugin like this one, and what the code does about it (all still true on 0.2.x):
 
 - **Session format v4** retired the `{ kind: 'plugin', plugin: <name> }` message source: appending one is refused with *"format v4 message requires a producer-owned source kind"*, and the v3→v4 migration rewrites old rows of unknown producers to `plugin:<name>`. The nudge therefore signs its reminder as `plugin:dsh-llm-wiki` — valid on v4, valid on v3 (which only requires a non-empty `kind`), and identical to what its own pre-v4 reminders become after migration.
 - **Observation moved off the waterfall.** The turn counters now ride `tools/result` (an emit over the frozen outcome, listener failures contained by the harness) instead of `tools/post-execute`, so a wiki observer can never sit in the path of a tool decision. Folded `agent/pre-step` decisions are spread rather than rebuilt, so decision fields newer than this plugin survive.
@@ -125,7 +126,7 @@ src/
 └── tools/                    the seven model-facing tools
 client/wiki-client.js         hand-written browser bundle (sidebar Wiki tab)
 prompts/                      router / extraction / mutation / validation playbooks
-test/                         vitest suites (173 tests, incl. the host-compatibility contract)
+test/                         vitest suites (176 tests, incl. the host-compatibility contract)
 ```
 
 Deep design notes (why link-only sources, why the resident prompt is byte-stable, why the nudge rides the next step) live in `DSH-Wiki_Project_Blueprint.md` and the playbooks under `prompts/`.
@@ -136,7 +137,7 @@ Deep design notes (why link-only sources, why the resident prompt is byte-stable
 pnpm install
 pnpm build        # tsc -> lib/ (committed; DSH loads it directly)
 pnpm typecheck
-pnpm test         # vitest, 173 tests
+pnpm test         # vitest, 176 tests
 pnpm smoke        # end-to-end passes against the built artifact
 pnpm prompt:size  # guard the resident-prompt byte budget
 ```
