@@ -1,8 +1,11 @@
-import type { LogEntry, MutationOp, MutationResult, PageKind, WikiLink, WikiPage } from '../types.js';
+import type { LintIssue, LogEntry, MutationOp, MutationResult, PageKind, WikiLink, WikiPage } from '../types.js';
 import type { WikiConfig } from '../config.js';
 import { assertPageId, isValidPageId, slugifyTitle } from '../storage/id-slug.js';
 import type { WikiStore } from '../storage/markdown-store.js';
 import { assertAdmissionScores, evaluateAdmission } from './admission.js';
+import { WikiGraph, type DanglingEdge, type GraphStats } from '../graph/graph.js';
+import { graphOptionsOf, checksFor } from '../validator/checks.js';
+import { suggestNeighbors, type NeighborSuggestion, type SuggestionSubject } from '../graph/suggest.js';
 
 /**
  * Mutation Engine: applies incremental knowledge mutations to the wiki —
@@ -10,17 +13,62 @@ import { assertAdmissionScores, evaluateAdmission } from './admission.js';
  * CREATE passes through the Admission Controller; every outcome (applied,
  * rejected, error) is journaled so the update history stays auditable.
  *
+ * Graph maintenance rides on the same seam. A batch is where a page gains
+ * edges, so it is also where a missing edge is still cheap to notice: after the
+ * writes land, the engine re-reads the corpus, rebuilds the derived graph, and
+ * reports what the batch did to the link structure — dangling edges, the same
+ * scoped lint findings `wiki_lint` would produce, and nominated links for the
+ * pages it touched. Nominating is all it does; an edge stays a decision.
+ *
  * Concurrency: mutations route through the store's in-process lock; page
  * revisions make lost updates detectable by the linter, not silently merged.
  *
  * @module dsh-llm-wiki/mutation/mutator
  */
 
+/** What the batch changed about the graph, and what it still leaves open. */
+export interface GraphFeedback {
+  /** Corpus shape (whole wiki, not just the batch). */
+  stats: GraphStats;
+  /** Edges the touched pages declare toward pages that do not exist. */
+  dangling: DanglingEdge[];
+  /** Candidate links per touched wiki-layer page. Nominations: nothing here is written. */
+  suggestions: { id: string; candidates: NeighborSuggestion[] }[];
+  /** `wiki_lint` checks over the touched pages only. */
+  findings: LintIssue[];
+  /** Advice worth stating in words (a page that gained no edge, a target to fix). */
+  notes: string[];
+  /** True when this feedback describes a proposal, not a applied write. */
+  preview: boolean;
+}
+
 export interface MutateOutcome {
   results: MutationResult[];
   applied: number;
   rejected: number;
   indexRebuilt: boolean;
+  /** Graph feedback for the batch, when graph reporting is enabled. */
+  graph: GraphFeedback;
+}
+
+/** Ids a write may point at: what is on disk, plus what this batch creates. */
+class WriteScope {
+  private readonly known: Set<string>;
+  private readonly promised: Set<string>;
+
+  constructor(known: Iterable<string>, promised: Iterable<string>) {
+    this.known = new Set(known);
+    this.promised = new Set(promised);
+  }
+
+  exists(id: string): boolean {
+    return this.known.has(id) || this.promised.has(id);
+  }
+
+  /** Declared targets no page answers, now or by the end of this batch. */
+  missing(links: readonly WikiLink[]): WikiLink[] {
+    return links.filter((link) => !this.exists(link.target));
+  }
 }
 
 function nowIso(): string {
@@ -67,6 +115,18 @@ function textValue(raw: unknown, field: string, required: boolean): string | und
   return raw;
 }
 
+/** The id a create op will land on, or undefined when the op cannot be named yet. */
+function createdId(op: MutationOp): string | undefined {
+  if (op.op !== 'create') return undefined;
+  if (op.id !== undefined) return op.id;
+  if (typeof op.title !== 'string' || op.title.trim().length === 0) return undefined;
+  return slugifyTitle(op.title);
+}
+
+function describeLinks(links: readonly WikiLink[]): string {
+  return links.map((link) => (link.relation === undefined ? `"${link.target}"` : `"${link.target}" (${link.relation})`)).join(', ');
+}
+
 export class Mutator {
   private readonly store: WikiStore;
   private readonly config: WikiConfig;
@@ -79,8 +139,16 @@ export class Mutator {
   /** Apply a batch of operations. One bad operation fails only itself. */
   async apply(ops: readonly MutationOp[]): Promise<MutateOutcome> {
     return await this.store.withLock(async () => {
+      const promised = new Set<string>();
+      for (const raw of ops) {
+        const id = createdId(raw as MutationOp);
+        if (id !== undefined) promised.add(id);
+      }
+      const onDisk = await this.store.listIds();
+
       const results: MutationResult[] = [];
       const entries: LogEntry[] = [];
+      const touched = new Set<string>();
       let applied = 0;
       let rejected = 0;
 
@@ -88,7 +156,7 @@ export class Mutator {
         const op = raw as MutationOp;
         let result: MutationResult;
         try {
-          result = await this.applyOne(op, index, entries);
+          result = await this.applyOne(op, index, entries, new WriteScope(onDisk.keys(), promised));
         } catch (error) {
           result = {
             index,
@@ -99,18 +167,131 @@ export class Mutator {
           };
         }
         results.push(result);
-        if (result.status === 'applied') applied++;
+        if (result.status === 'applied') {
+          applied++;
+          for (const id of resultPages(op, result)) touched.add(id);
+        }
         if (result.status === 'rejected' || result.status === 'error') rejected++;
       }
 
       let indexRebuilt = false;
+      let pages: WikiPage[] = [];
       if (applied > 0) {
-        await this.store.rebuildIndex();
+        pages = (await this.store.listPages()).pages;
+        await this.store.rebuildIndex(pages);
         indexRebuilt = true;
       }
       if (this.config.mutationLog && entries.length > 0) await this.store.appendLog(entries);
-      return { results, applied, rejected, indexRebuilt };
+      const graph = await this.graphOf(pages);
+      const feedback = await this.feedback(graph, touched, false);
+      return { results, applied, rejected, indexRebuilt, graph: feedback };
     });
+  }
+
+  /**
+   * What the graph would look like if this batch were applied, without writing
+   * anything. The write gate parks most batches in `staging/`, so the same
+   * feedback has to be legible at proposal time too — an edge that will dangle
+   * is worth naming before the user ever sees the pitch.
+   */
+  async previewGraph(ops: readonly MutationOp[]): Promise<GraphFeedback> {
+    const graph = await this.graphOf();
+    const promised = new Set<string>();
+    for (const raw of ops) {
+      const id = createdId(raw as MutationOp);
+      if (id !== undefined) promised.add(id);
+    }
+    const scope = new WriteScope(graph.pages.map((page) => page.id), promised);
+    const subjects: SuggestionSubject[] = [];
+    const dangling: DanglingEdge[] = [];
+    const notes: string[] = [];
+    for (const raw of ops) {
+      const op = raw as MutationOp;
+      const id = createdId(op) ?? op.id;
+      if (id === undefined) continue;
+      if (op.links !== undefined) {
+        let links: WikiLink[];
+        try {
+          links = parseLinkEntries(op.links, id);
+        } catch {
+          continue; // a malformed entry is the tool's error to report, not this one's
+        }
+        for (const link of scope.missing(links)) {
+          const edge: DanglingEdge = { page: id, target: link.target, kind: 'link' };
+          if (link.relation !== undefined) edge.relation = link.relation;
+          dangling.push(edge);
+        }
+      }
+      if (op.op === 'create' || op.op === 'update') {
+        const existing = graph.get(id);
+        subjects.push({
+          id,
+          title: op.title ?? existing?.title ?? id,
+          tags: op.tags ?? existing?.tags ?? [],
+          body: op.body ?? existing?.body ?? '',
+        });
+      }
+    }
+    const suggestions = this.suggestFor(graph, subjects);
+    for (const edge of dangling) {
+      notes.push(`${edge.page} links to "${edge.target}", which does not exist${this.config.linkTargetCheck === 'strict' ? ' — strict mode will refuse this write' : '; create the page or drop the link'}`);
+    }
+    for (const entry of suggestions) {
+      if (entry.candidates.length === 0 && !graph.has(entry.id)) notes.push(`${entry.id} is a new page with no candidate neighbour yet — it starts life unlinked`);
+    }
+    return { stats: graph.stats(), dangling, suggestions, findings: [], notes, preview: true };
+  }
+
+  /** Rebuild the derived graph over the corpus (pass `pages` to reuse a listing). */
+  async graphOf(pages?: readonly WikiPage[]): Promise<WikiGraph> {
+    const loaded = pages ?? (await this.store.listPages()).pages;
+    return WikiGraph.fromPages(loaded, graphOptionsOf(this.config));
+  }
+
+  /** Nominated links for one existing page, over a graph the caller already has. */
+  suggestionsFor(page: WikiPage, graph: WikiGraph): NeighborSuggestion[] {
+    if (page.kind === 'source') return [];
+    return this.suggestFor(graph, [{ id: page.id, title: page.title, tags: page.tags, body: page.body }])[0]?.candidates ?? [];
+  }
+
+  private suggestFor(graph: WikiGraph, subjects: readonly SuggestionSubject[]): { id: string; candidates: NeighborSuggestion[] }[] {    if (!this.config.linkSuggest) return [];
+    const out: { id: string; candidates: NeighborSuggestion[] }[] = [];
+    for (const subject of subjects) {
+      const candidates = suggestNeighbors(graph, subject, {
+        limit: this.config.linkSuggestLimit,
+        minScore: this.config.linkSuggestMinScore,
+        agingAfterDays: this.config.agingAfterDays,
+        staleAfterDays: this.config.staleAfterDays,
+      });
+      out.push({ id: subject.id, candidates });
+    }
+    return out;
+  }
+
+  /** Assemble the write-result graph feedback over a fresh graph. */
+  private async feedback(graph: WikiGraph, touched: ReadonlySet<string>, preview: boolean): Promise<GraphFeedback> {
+    const stats = graph.stats();
+    if (touched.size === 0) return { stats, dangling: [], suggestions: [], findings: [], notes: [], preview };
+    const touchedPages = graph.pages.filter((page) => touched.has(page.id));
+    // `off` means the write path has no opinion about link targets at all.
+    const dangling = this.config.linkTargetCheck === 'off' ? [] : graph.danglingEdges().filter((edge) => touched.has(edge.page));
+    const findings = checksFor(graph, this.config, touchedPages);
+    const subjects = touchedPages.filter((page) => page.kind !== 'source').map((page) => ({ id: page.id, title: page.title, tags: page.tags, body: page.body }));
+    const suggestions = this.suggestFor(graph, subjects);
+    const notes: string[] = [];
+    for (const page of touchedPages) {
+      if (page.kind === 'source' || page.status !== 'active') continue;
+      if (graph.knowledgeOutbound(page.id) === 0) {
+        notes.push(`${page.id} now has no outgoing edge: it is only reachable if something links to it`);
+      }
+      if (graph.knowledgeInbound(page.id) === 0 && suggestions.find((entry) => entry.id === page.id)?.candidates.length === 0) {
+        notes.push(`${page.id} is not reachable from any page and no candidate neighbour scored — link it deliberately or merge it into one`);
+      }
+    }
+    for (const edge of dangling) {
+      notes.push(`${edge.page} links to "${edge.target}", which does not exist — create the page or drop the link`);
+    }
+    return { stats, dangling, suggestions, findings, notes, preview };
   }
 
   private log(entries: LogEntry[], op: MutationOp, pages: string[], result: string, detail?: string): void {
@@ -120,12 +301,12 @@ export class Mutator {
     entries.push(entry);
   }
 
-  private async applyOne(op: MutationOp, index: number, entries: LogEntry[]): Promise<MutationResult> {
+  private async applyOne(op: MutationOp, index: number, entries: LogEntry[], scope: WriteScope): Promise<MutationResult> {
     switch (op.op) {
       case 'create':
-        return await this.create(op, index, entries);
+        return await this.create(op, index, entries, scope);
       case 'update':
-        return await this.update(op, index, entries);
+        return await this.update(op, index, entries, scope);
       case 'merge':
         return await this.merge(op, index, entries);
       case 'link':
@@ -144,7 +325,20 @@ export class Mutator {
     }
   }
 
-  private async create(op: MutationOp, index: number, entries: LogEntry[]): Promise<MutationResult> {
+  /**
+   * The one standard for a link target, applied to every write path. `off`
+   * stays silent; `warn` writes and lets the feedback name the hole; `strict`
+   * refuses, so a wiki can be held to "no edge points at nothing".
+   */
+  private checkTargets(id: string, links: readonly WikiLink[], scope: WriteScope): string | undefined {
+    if (this.config.linkTargetCheck === 'off') return undefined;
+    const missing = scope.missing(links);
+    if (missing.length === 0) return undefined;
+    if (this.config.linkTargetCheck !== 'strict') return undefined;
+    return `link target(s) do not exist: ${describeLinks(missing)}. Create the target first (ids made by this same batch do count), or drop the link. Set linkTargetCheck to "warn" to write anyway.`;
+  }
+
+  private async create(op: MutationOp, index: number, entries: LogEntry[], scope: WriteScope): Promise<MutationResult> {
     const title = textValue(op.title, 'title', true) as string;
     const body = textValue(op.body, 'body', true) as string;
     const kind: PageKind = op.kind === 'entity' ? 'entity' : 'concept';
@@ -179,9 +373,14 @@ export class Mutator {
       };
     }
     this.checkBodySize(id, body);
+    const links = parseLinkEntries(op.links ?? [], id);
+    const refused = this.checkTargets(id, links, scope);
+    if (refused !== undefined) {
+      this.log(entries, op, [id], 'rejected', refused);
+      return { index, op: 'create', id, status: 'rejected', detail: refused };
+    }
 
     const now = nowIso();
-    const links = parseLinkEntries(op.links ?? [], id);
     const page: WikiPage = {
       id,
       kind,
@@ -202,7 +401,7 @@ export class Mutator {
     return { index, op: 'create', id, status: 'applied', detail: `created ${kind} page (revision 1, admission avg ${verdict.average})` };
   }
 
-  private async update(op: MutationOp, index: number, entries: LogEntry[]): Promise<MutationResult> {
+  private async update(op: MutationOp, index: number, entries: LogEntry[], scope: WriteScope): Promise<MutationResult> {
     const id = textValue(op.id, 'id', true) as string;
     assertPageId(id);
     const page = await this.store.read(id);
@@ -212,6 +411,12 @@ export class Mutator {
     if (op.body !== undefined && body === undefined) throw new Error('body must be a string');
     if (body !== undefined) this.checkBodySize(id, body);
     const title = op.title !== undefined ? (textValue(op.title, 'title', false) as string) : undefined;
+    const addedLinks = op.links !== undefined ? parseLinkEntries(op.links, id) : [];
+    const refused = this.checkTargets(id, unionLinks(page.links, addedLinks), scope);
+    if (refused !== undefined) {
+      this.log(entries, op, [id], 'rejected', refused);
+      return { index, op: 'update', id, status: 'rejected', detail: refused };
+    }
 
     const updated: WikiPage = {
       ...page,
@@ -219,7 +424,7 @@ export class Mutator {
       body: body !== undefined ? body.trimEnd() + '\n' : page.body,
       status: op.status ?? page.status,
       tags: op.tags !== undefined ? unionList(page.tags, op.tags) : page.tags,
-      links: op.links !== undefined ? unionLinks(page.links, parseLinkEntries(op.links, id)) : page.links,
+      links: op.links !== undefined ? unionLinks(page.links, addedLinks) : page.links,
       sources: op.sources !== undefined ? unionList(page.sources, op.sources.map((s) => (assertPageId(s), s))) : page.sources,
       revision: page.revision + 1,
       updated: nowIso(),
@@ -321,4 +526,29 @@ export class Mutator {
     this.log(entries, op, [id], 'applied', reason);
     return { index, op: 'deprecate', id, status: 'applied', detail: `deprecated (revision ${deprecated.revision}); page kept for history, excluded from default search` };
   }
+}
+
+/** Every page id a result touches, so the feedback covers both sides of a merge. */
+function resultPages(op: MutationOp, result: MutationResult): string[] {
+  const ids = [result.id];
+  if (op.op === 'merge' && op.into_id !== undefined) ids.push(op.into_id);
+  if (op.op === 'link' && op.to_id !== undefined) ids.push(op.to_id);
+  if (op.op === 'deprecate' && op.superseded_by !== undefined) ids.push(op.superseded_by);
+  return ids;
+}
+
+/**
+ * One-line human summary of graph feedback, for tool results and journals.
+ * Deterministic and short: the numbers first, the advice only when there is a
+ * hole worth naming.
+ */
+export function describeGraph(feedback: GraphFeedback): string {
+  const stats = feedback.stats;
+  const head = `graph: ${stats.edges} edge(s) (${stats.byKind.link} link${stats.byKind.wikilink > 0 ? `, ${stats.byKind.wikilink} [[id]]` : ''}${stats.byKind.source > 0 ? `, ${stats.byKind.source} source` : ''}), ${stats.dangling} dangling, ${stats.orphans}/${stats.pages} orphan(s)`;
+  const advice = feedback.notes.slice(0, 3);
+  const suggestions = feedback.suggestions.reduce((sum, entry) => sum + entry.candidates.length, 0);
+  const parts = [head];
+  if (suggestions > 0) parts.push(`${suggestions} candidate link(s) nominated — verify them with wiki_inspect and add the ones that hold with op "link"`);
+  if (advice.length > 0) parts.push(advice.join('; '));
+  return parts.join(' — ');
 }

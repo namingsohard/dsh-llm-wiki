@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { WikiStore } from '../src/storage/markdown-store.js';
-import { searchWiki, tokenize, queryTokens, tokenWeight } from '../src/retrieval/grep-retriever.js';
+import { expandNeighbors, searchWiki, tokenize, queryTokens, tokenWeight } from '../src/retrieval/grep-retriever.js';
 import { routeQuery, coverageFromScore, isTimeSensitive } from '../src/router/knowledge-router.js';
 import { slugifyTitle, sourceId, assertPageId } from '../src/storage/id-slug.js';
 import type { SearchHit, WikiPage } from '../src/types.js';
@@ -321,5 +321,50 @@ describe('id-slug', () => {
     expect(() => assertPageId('../x')).toThrow();
     expect(() => assertPageId('OK-upper')).toThrow();
     expect(() => assertPageId('ok-id.1_2')).not.toThrow();
+  });
+});
+
+describe('graph expansion', () => {
+  const graphOptions = { wikiLinkEdges: false, sourceEdges: true };
+
+  async function seedGraph(): Promise<WikiStore> {
+    const local = new WikiStore(root);
+    await local.ensureInit();
+    await local.writePage(page({ id: 'lod', title: 'Character LOD distance', body: 'Distance LOD thresholds for distant characters.\n', links: [{ target: 'fov', relation: 'related' }] }));
+    await local.writePage(page({ id: 'fov', title: 'FOV compensation', body: 'FOV widens or narrows the view.\n' }));
+    await local.writePage(page({ id: 'unrelated', title: 'Sourdough starter', body: 'Feed it weekly.\n' }));
+    return local;
+  }
+
+  const options = { limit: 5, includeDeprecated: false, agingAfterDays: 90, staleAfterDays: 365 };
+
+  it('appends one-hop neighbours as related, never as hits', async () => {
+    const local = await seedGraph();
+    const result = await searchWiki(local, { ...options, query: 'Character LOD distance', expand: { limit: 3, graph: graphOptions } });
+    expect(result.hits.map((hit) => hit.id)).toEqual(['lod']);
+    expect(result.related.map((row) => row.id)).toEqual(['fov']);
+    expect(result.related[0]).toMatchObject({ via: ['lod'], relation: 'related' });
+  });
+
+  it('reports no neighbours at all unless the caller asks', async () => {
+    const local = await seedGraph();
+    const result = await searchWiki(local, { ...options, query: 'Character LOD distance' });
+    expect(result.related).toHaveLength(0);
+  });
+
+  it('walks incoming edges too and keeps the result ordered', () => {
+    const pages = [
+      page({ id: 'a', title: 'Alpha', body: 'alpha topic' }),
+      page({ id: 'b', title: 'Beta', body: 'beta topic' }),
+      page({ id: 'hub', title: 'Hub', body: 'hub topic', links: [{ target: 'a' }] }),
+    ];
+    const hits: SearchHit[] = [
+      { id: 'a', kind: 'concept', title: 'Alpha', status: 'active', score: 9, match: { matched: 1, total: 1, strong: 1 }, freshness: 'fresh', snippet: '', updated: '2026-02-03T10:00:00.000Z' },
+      { id: 'b', kind: 'concept', title: 'Beta', status: 'active', score: 8, match: { matched: 1, total: 1, strong: 1 }, freshness: 'fresh', snippet: '', updated: '2026-02-03T10:00:00.000Z' },
+    ];
+    const related = expandNeighbors(pages, hits, { query: 'alpha beta', qTokens: ['alpha', 'beta'], limit: 5, graph: graphOptions, agingAfterDays: 90, staleAfterDays: 365 });
+    expect(related.map((row) => row.id)).toEqual(['hub']);
+    expect(related[0]?.via).toEqual(['a']);
+    expect(expandNeighbors(pages, hits, { query: 'alpha', qTokens: ['alpha'], limit: 0, graph: graphOptions, agingAfterDays: 90, staleAfterDays: 365 })).toHaveLength(0);
   });
 });

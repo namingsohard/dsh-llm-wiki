@@ -71,4 +71,36 @@ describe('wiki linter', () => {
     expect(report.parseFailures).toHaveLength(1);
     expect(report.parseFailures[0]?.path).toContain('corrupt.md');
   });
+
+  it('flags a source card no page cites, and stops when one does', async () => {
+    await store.writePage(page({ id: 'fact', title: 'Fact', path: join(root, 'concepts', 'fact.md') }));
+    await store.writePage(page({ id: 'src-20261004-aaaaaa11', kind: 'source', title: 'A guide', path: join(root, 'sources', 'src-20261004-aaaaaa11.md') }));
+    const uncited = await lintWiki(store, config);
+    expect(uncited.issues.some((i) => i.check === 'unreferenced-source' && i.page === 'src-20261004-aaaaaa11')).toBe(true);
+
+    await store.writePage(page({ id: 'other', title: 'Other', path: join(root, 'concepts', 'other.md') }));
+    await store.writePage(page({ id: 'fact', title: 'Fact', sources: ['src-20261004-aaaaaa11'], links: [{ target: 'other' }], path: join(root, 'concepts', 'fact.md') }));
+    const cited = await lintWiki(store, config);
+    expect(cited.issues.some((i) => i.check === 'unreferenced-source')).toBe(false);
+  });
+
+  it('counts a [[id]] mention as a link only when that family is enabled', async () => {
+    await store.writePage(page({ id: 'hub', title: 'Hub', body: 'See [[lonely]] for the rest.\n', path: join(root, 'concepts', 'hub.md') }));
+    await store.writePage(page({ id: 'lonely', title: 'Lonely', path: join(root, 'concepts', 'lonely.md') }));
+
+    const off = await lintWiki(store, config);
+    expect(off.issues.some((i) => i.check === 'orphan' && i.page === 'lonely')).toBe(true);
+
+    const withMentions = resolveConfig({ wikiLinkEdges: true });
+    const on = await lintWiki(store, withMentions);
+    expect(on.issues.some((i) => i.check === 'orphan' && i.page === 'lonely')).toBe(false);
+    expect(on.issues.some((i) => i.check === 'broken-link')).toBe(false);
+  });
+
+  it('names a [[id]] mention of a page that does not exist', async () => {
+    await store.writePage(page({ id: 'stub', title: 'Stub', status: 'merged', body: '> Merged into **[[nowhere]] (Nowhere)**.\n', path: join(root, 'concepts', 'stub.md') }));
+    const report = await lintWiki(store, resolveConfig({ wikiLinkEdges: true }));
+    const finding = report.issues.find((i) => i.check === 'broken-link' && i.page === 'stub');
+    expect(finding?.message).toContain('[[nowhere]]');
+  });
 });

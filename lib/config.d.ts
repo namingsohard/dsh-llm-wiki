@@ -24,6 +24,15 @@ export type WikiApprovalMode = 'staging' | 'inline' | 'off';
  * The legacy spelling `turn-end` is accepted and normalized to `next-step`.
  */
 export type WikiNudgeMode = 'next-step' | 'off';
+/**
+ * How the write path treats a link whose target no page answers (a dangling
+ * edge). See `docs/proposal-graph-maintenance.md` (G2).
+ * - `warn`: apply the write and name the dangling edge in the result. The default.
+ * - `strict`: refuse the write; ids created earlier in the same batch count as
+ *   existing, so a batch may still introduce a cluster of linked pages.
+ * - `off`: stay silent (the v0.2 behaviour).
+ */
+export type LinkTargetCheck = 'warn' | 'strict' | 'off';
 /** Fully-resolved plugin configuration. */
 export interface WikiConfig {
     /** Absolute-or-empty wiki root. Empty means "auto-resolve" (see {@link resolveWikiRoot}). */
@@ -54,6 +63,22 @@ export interface WikiConfig {
     maxStagedBytes: number;
     /** Reminder folded into the next step after a turn browsed the web without the wiki. */
     nudge: WikiNudgeMode;
+    /** How the write path handles a link target that no page answers. */
+    linkTargetCheck: LinkTargetCheck;
+    /** Nominate candidate links for a page being created or updated (never auto-written). */
+    linkSuggest: boolean;
+    /** Cap on nominated candidates per touched page. */
+    linkSuggestLimit: number;
+    /** A candidate must score at least this on the `wiki_search` scale to be nominated. */
+    linkSuggestMinScore: number;
+    /** Treat `sources:` refs as provenance edges in the derived graph. */
+    sourceEdges: boolean;
+    /** Derive edges from `[[page-id]]` mentions in bodies (opt-in: it changes lint output). */
+    wikiLinkEdges: boolean;
+    /** Let `wiki_search` surface one-hop graph neighbors of what it matched. */
+    graphExpansion: boolean;
+    /** Cap on graph-expanded neighbors appended to a `wiki_search` result. */
+    graphExpansionLimit: number;
 }
 export declare const DEFAULT_CONFIG: WikiConfig;
 /** Schemastery configuration for the `wiki` plugin consumer. */
@@ -72,6 +97,14 @@ export declare const Config: Schema<Schemastery.ObjectS<NoInfer<{
     approval: Schema<"staging" | "inline" | "off", "staging" | "inline" | "off", "defined">;
     maxStagedBytes: Schema<number, number, "defined">;
     nudge: Schema<"off" | "next-step" | "turn-end", "off" | "next-step" | "turn-end", "defined">;
+    linkTargetCheck: Schema<"off" | "warn" | "strict", "off" | "warn" | "strict", "defined">;
+    linkSuggest: Schema<boolean, boolean, "defined">;
+    linkSuggestLimit: Schema<number, number, "defined">;
+    linkSuggestMinScore: Schema<number, number, "defined">;
+    sourceEdges: Schema<boolean, boolean, "defined">;
+    wikiLinkEdges: Schema<boolean, boolean, "defined">;
+    graphExpansion: Schema<boolean, boolean, "defined">;
+    graphExpansionLimit: Schema<number, number, "defined">;
 }>>, Schemastery.ObjectT<NoInfer<{
     wikiRoot: Schema<string, string, "defined">;
     searchLimit: Schema<number, number, "defined">;
@@ -87,6 +120,14 @@ export declare const Config: Schema<Schemastery.ObjectS<NoInfer<{
     approval: Schema<"staging" | "inline" | "off", "staging" | "inline" | "off", "defined">;
     maxStagedBytes: Schema<number, number, "defined">;
     nudge: Schema<"off" | "next-step" | "turn-end", "off" | "next-step" | "turn-end", "defined">;
+    linkTargetCheck: Schema<"off" | "warn" | "strict", "off" | "warn" | "strict", "defined">;
+    linkSuggest: Schema<boolean, boolean, "defined">;
+    linkSuggestLimit: Schema<number, number, "defined">;
+    linkSuggestMinScore: Schema<number, number, "defined">;
+    sourceEdges: Schema<boolean, boolean, "defined">;
+    wikiLinkEdges: Schema<boolean, boolean, "defined">;
+    graphExpansion: Schema<boolean, boolean, "defined">;
+    graphExpansionLimit: Schema<number, number, "defined">;
 }>>, "plain">;
 /** Fill defaults and normalize inter-field constraints. */
 export declare function resolveConfig(config?: Partial<WikiConfig> | undefined): WikiConfig;

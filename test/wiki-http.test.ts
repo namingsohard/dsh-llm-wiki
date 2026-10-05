@@ -295,3 +295,68 @@ describe('wiki-http registration race', () => {
     expect(live.routes).toHaveLength(0);
   });
 });
+
+describe('wiki-http graph surface', () => {
+  async function seedGraph(store: WikiStore): Promise<void> {
+    await store.ensureInit();
+    await store.writePage(
+      page({
+        id: 'lod',
+        title: 'Character LOD distance',
+        tags: ['rendering'],
+        body: 'Distance LOD thresholds; FOV compensation changes them.\n',
+        links: [{ target: 'fov', relation: 'related' }, { target: 'wwmi-mod-workspace' }],
+        sources: ['src-20260301-aaaa1111'],
+      }),
+    );
+    await store.writePage(page({ id: 'fov', title: 'FOV compensation', tags: ['rendering'], body: 'FOV changes how far the LOD distance reaches.\n' }));
+    await store.writePage(page({ id: 'pull-bias', title: 'View pull bias', tags: ['rendering'], body: 'View pull bias offsets LOD distance when you turn.\n' }));
+    await store.writePage(page({ id: 'src-20260301-aaaa1111', kind: 'source', title: 'Example Source', url: 'https://example.com/a' }));
+  }
+
+  it('puts the edges and the graph summary on every tree row', async () => {
+    const store = new WikiStore(root);
+    await seedGraph(store);
+    const handlers = createWikiHttpHandlers(store, new StagingQueue(root), resolveConfig());
+    const { body } = await call(handlers.tree, '/wiki/tree');
+
+    expect(body.graph).toMatchObject({ pages: 4, edges: 3, dangling: 1, orphans: 2 });
+    const concepts = body.sections.find((section: any) => section.kind === 'concept');
+    const lod = concepts.pages.find((row: any) => row.id === 'lod');
+    expect(lod).toMatchObject({ links: 2, backlinks: 0, dangling: 1 });
+    expect(concepts.pages.find((row: any) => row.id === 'fov')).toMatchObject({ links: 0, backlinks: 1, dangling: 0 });
+    // A page with neither edge is the one the sidebar marks with ◇.
+    expect(concepts.pages.find((row: any) => row.id === 'pull-bias')).toMatchObject({ links: 0, backlinks: 0, dangling: 0 });
+  });
+
+  it('tells the reader what claims the page, what it claims, and what is missing', async () => {
+    const store = new WikiStore(root);
+    await seedGraph(store);
+    const handlers = createWikiHttpHandlers(store, new StagingQueue(root), resolveConfig());
+    const { body } = await call(handlers.page, '/wiki/page?kind=concept&id=fov');
+
+    const graph = body.page.graph;
+    expect(graph.backlinks).toEqual([{ id: 'lod', title: 'Character LOD distance', kind: 'concept', via: 'link', relation: 'related' }]);
+    expect(graph.outgoing).toHaveLength(0);
+    expect(graph.dangling).toHaveLength(0);
+    // Nominated, not written — and never a page this one is already wired to.
+    const nominated = graph.candidates.map((row: any) => row.id);
+    expect(nominated).toContain('pull-bias');
+    expect(nominated).not.toContain('lod');
+    expect(graph.candidates.find((row: any) => row.id === 'pull-bias').shared.length).toBeGreaterThan(0);
+  });
+
+  it('names a page own dangling edge and the pages citing a source card', async () => {
+    const store = new WikiStore(root);
+    await seedGraph(store);
+    const handlers = createWikiHttpHandlers(store, new StagingQueue(root), resolveConfig());
+
+    const page1 = await call(handlers.page, '/wiki/page?kind=concept&id=lod');
+    expect(page1.body.page.graph.dangling).toEqual([{ target: 'wwmi-mod-workspace', via: 'link' }]);
+    expect(page1.body.page.graph.outgoing.find((row: any) => row.target === 'fov')).toMatchObject({ exists: true, relation: 'related' });
+    expect(page1.body.page.graph.outgoing.find((row: any) => row.target === 'wwmi-mod-workspace')).toMatchObject({ exists: false });
+
+    const card = await call(handlers.page, '/wiki/page?kind=source&id=src-20260301-aaaa1111');
+    expect(card.body.page.graph.referenced_by).toEqual(['lod']);
+  });
+});

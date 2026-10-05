@@ -168,9 +168,13 @@ export class WikiStore {
     return { pages, failures };
   }
 
-  /** Rebuild `index.md` from the current page set. */
-  async rebuildIndex(): Promise<void> {
-    const { pages } = await this.listPages();
+  /**
+   * Rebuild `index.md` from the current page set. Pass `pages` to reuse a
+   * listing already in hand — the write path reads the corpus once and hands
+   * the same pages to the index and to the derived graph.
+   */
+  async rebuildIndex(preread?: readonly WikiPage[]): Promise<void> {
+    const pages = preread ?? (await this.listPages()).pages;
     const byKind = (kind: PageKind) =>
       pages
         .filter((page) => page.kind === kind && page.status === 'active')

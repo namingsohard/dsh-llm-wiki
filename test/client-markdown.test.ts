@@ -34,8 +34,14 @@ interface Element {
 
 type Rendered = Element | string;
 
+/** What the reader hands the renderer to make cross-page references live. */
+interface Links {
+  resolve(id: string): string | undefined;
+  open(id: string, section: string): void;
+}
+
 /** Read the renderer section out of the bundle (grammar through `renderMarkdown`). */
-function loadRenderer(nodeBudget: number): (md: string) => Rendered[] {
+function loadRenderer(nodeBudget: number): (md: string, links?: Links) => Rendered[] {
   const start = bundle.indexOf('const INLINE_PATTERN');
   const end = bundle.indexOf('/* -------------------------------------------------------------- views */');
   if (start < 0 || end < 0 || end < start) throw new Error('renderer section not found in client/wiki-client.js');
@@ -47,7 +53,7 @@ function loadRenderer(nodeBudget: number): (md: string) => Rendered[] {
   };
   const factory = new Function('h', `${bundle.slice(start, end)}\nreturn renderMarkdown;`) as (
     create: typeof h,
-  ) => (md: string) => Rendered[];
+  ) => (md: string, links?: Links) => Rendered[];
   return factory(h);
 }
 
@@ -114,5 +120,54 @@ describe('wiki browser markdown renderer', () => {
     expect(find(out, 'h2')).toBeDefined();
     expect(find(out, 'pre')).toBeDefined();
     expect(textOf(out)).toContain('code **not** parsed');
+  });
+});
+
+describe('cross-page references', () => {
+  /** A reader that knows two pages, one of them the merge stub's target. */
+  const opened: string[] = [];
+  const links: Links = {
+    resolve: (id) => (id === 'new-page' ? 'concept' : id === 'other' ? 'entity' : undefined),
+    open: (id, section) => opened.push(`${section}:${id}`),
+  };
+
+  it('paints a [[id]] mention as a dead label when the reader has no wiki context', () => {
+    const out = render('Merged into **[[new-page]] (New Page)**.', undefined);
+    const dead = find(out, 'span');
+    expect(dead?.props?.className).toBe('dshwiki-deadlink');
+    expect(textOf(out)).toBe('Merged into new-page (New Page).');
+  });
+
+  it('makes a [[id]] mention live once the tree says the page exists', () => {
+    opened.length = 0;
+    const out = render('Merged into **[[new-page]] (New Page)**.', links);
+    const button = find(out, 'button');
+    expect(button?.props?.className).toBe('dshwiki-crosslink');
+    expect(textOf(out)).toBe('Merged into new-page (New Page).');
+    (button?.props?.onClick as () => void)();
+    expect(opened).toEqual(['concept:new-page']);
+  });
+
+  it('honours the alias tail and keeps an unknown target quiet', () => {
+    const alias = render('see [[new-page|the successor]] done', links);
+    expect(textOf(alias)).toBe('see the successor done');
+    const unknown = render('see [[ghost-page]] done', links);
+    expect(find(unknown, 'button')).toBeUndefined();
+    expect(textOf(unknown)).toBe('see ghost-page done');
+  });
+
+  it('upgrades a markdown link to a page id when that page exists', () => {
+    opened.length = 0;
+    const out = render('see [the workspace](other) for details', links);
+    const button = find(out, 'button');
+    expect(button?.props?.className).toBe('dshwiki-crosslink');
+    (button?.props?.onClick as () => void)();
+    expect(opened).toEqual(['entity:other']);
+    expect(textOf(out)).toContain('for details');
+  });
+
+  it('never mistakes an anchor-less bracketed id for two tokens', () => {
+    const out = render('[[new-page]] then [bare] then [[new-page]] again', links);
+    expect(textOf(out)).toBe('new-page then [bare] then new-page again');
   });
 });

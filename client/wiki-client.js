@@ -66,6 +66,20 @@ window.__ModuleLoader__.load({
 			"meta.sources": "来源",
 			"meta.truncated": "正文过长，仅显示前一部分。",
 			"meta.payload": "提议内容",
+			"meta.links": "出边",
+			"meta.backlinks": "入边",
+			"graph.out": "本页指向",
+			"graph.in": "反向链接",
+			"graph.dangling": "指向不存在的页面",
+			"graph.dangling.note": "这些边没有目标页：补上目标页，或用 wiki_mutate 改掉这条边。",
+			"graph.candidates": "候选链接（打分提名）",
+			"graph.candidates.note": "提名不是事实。核对内容后，用 wiki_mutate 的 link 操作把成立的那几条写成边。",
+			"graph.cited": "被以下页面引用",
+			"graph.summary": "{pages} 页 · {edges} 条边 · {dangling} 条悬空 · {orphans} 个孤儿",
+			"graph.summaryTitle": "链接图的形状（派生值，不入库）",
+			"graph.rowBacklinks": "入边数量",
+			"graph.rowIsolated": "这页与任何页面都没有边相连",
+			"graph.rowDangling": "有指向不存在页面的边",
 			"failures": "{count} 个文件解析失败",
 		};
 		const en = {
@@ -97,6 +111,20 @@ window.__ModuleLoader__.load({
 			"meta.sources": "sources",
 			"meta.truncated": "The body is long; only the first part is shown.",
 			"meta.payload": "proposed content",
+			"meta.links": "out",
+			"meta.backlinks": "in",
+			"graph.out": "Points at",
+			"graph.in": "Backlinks",
+			"graph.dangling": "Edges to pages that do not exist",
+			"graph.dangling.note": "These edges have no target page. Create it, or rewrite the edge with wiki_mutate.",
+			"graph.candidates": "Candidate links (nominated)",
+			"graph.candidates.note": "A nomination is not a fact. Check the page, then write the ones that hold with wiki_mutate op \"link\".",
+			"graph.cited": "Cited by",
+			"graph.summary": "{pages} pages · {edges} edges · {dangling} dangling · {orphans} orphan(s)",
+			"graph.summaryTitle": "Shape of the link graph (derived, not stored)",
+			"graph.rowBacklinks": "incoming edges",
+			"graph.rowIsolated": "No edge connects this page to any other",
+			"graph.rowDangling": "Has an edge toward a page that does not exist",
 			"failures": "{count} file(s) failed to parse",
 		};
 
@@ -304,7 +332,7 @@ window.__ModuleLoader__.load({
 		/* ------------------------------------------------ markdown renderer */
 
 		/** Inline token grammar; the pattern only — `scanOf` mints the scanner. */
-		const INLINE_PATTERN = /(`[^`\n]+`)|(\*\*([^*\n]+)\*\*)|(\*([^*\n]+)\*)|(~~([^~\n]+)~~)|(\[([^\]\n]*)\]\(([^)\s]+)\))/;
+		const INLINE_PATTERN = /(`[^`\n]+`)|(\*\*([^*\n]+)\*\*)|(\*([^*\n]+)\*)|(~~([^~\n]+)~~)|(\[([^\]\n]*)\]\(([^)\s]+)\))|(\[\[([a-z0-9][a-z0-9._-]{0,79})(?:\|([^\]\n]*))?\]\])/;
 
 		/**
 		 * One scanning regex per call site. `exec` walks a `g` regex through its
@@ -320,8 +348,34 @@ window.__ModuleLoader__.load({
 			return new RegExp(INLINE_PATTERN.source, "g");
 		}
 
+		/**
+		 * What the renderer knows about the wiki, when a caller wants cross-page
+		 * references to be live: `resolve(id)` answers the page's section (its
+		 * kind) or undefined, and `open(id, section)` moves the reader there.
+		 * Without it the renderer stays a pure Markdown painter and every
+		 * cross-page reference is drawn as a dead label, as before.
+		 */
+
+		/** A live in-wiki link: a button, so no host route or hash is touched. */
+		function crosslink(key, target, label, links) {
+			return h(
+				"button",
+				{
+					type: "button",
+					key,
+					className: "dshwiki-crosslink",
+					title: `→ ${target}`,
+					onClick: () => {
+						const section = links.resolve(target);
+						if (section !== undefined) links.open(target, section);
+					},
+				},
+				label,
+			);
+		}
+
 		/** Turn one line of Markdown text into React nodes (no raw HTML). */
-		function inlineNodes(text, keyBase) {
+		function inlineNodes(text, keyBase, links) {
 			const nodes = [];
 			let cursor = 0;
 			let index = 0;
@@ -331,17 +385,28 @@ window.__ModuleLoader__.load({
 				if (match.index > cursor) nodes.push(text.slice(cursor, match.index));
 				const key = `${keyBase}-${String(index++)}`;
 				if (match[1] !== undefined) nodes.push(h("code", { key }, match[1].slice(1, -1)));
-				else if (match[2] !== undefined) nodes.push(h("strong", { key }, inlineNodes(match[3], key)));
-				else if (match[4] !== undefined) nodes.push(h("em", { key }, inlineNodes(match[5], key)));
-				else if (match[6] !== undefined) nodes.push(h("del", { key }, inlineNodes(match[7], key)));
+				else if (match[2] !== undefined) nodes.push(h("strong", { key }, inlineNodes(match[3], key, links)));
+				else if (match[4] !== undefined) nodes.push(h("em", { key }, inlineNodes(match[5], key, links)));
+				else if (match[6] !== undefined) nodes.push(h("del", { key }, inlineNodes(match[7], key, links)));
 				else if (match[8] !== undefined) {
 					const label = match[9];
 					const href = match[10];
-					nodes.push(
-						/^https?:/i.test(href)
-							? h("a", { key, href, target: "_blank", rel: "noreferrer noopener" }, inlineNodes(label === "" ? href : label, key))
-							: h("span", { key, className: "dshwiki-deadlink", title: href }, label.length > 0 ? label : href),
-					);
+					const external = /^https?:/i.test(href);
+					const section = external || links === undefined ? undefined : links.resolve(href);
+					if (external)
+						nodes.push(h("a", { key, href, target: "_blank", rel: "noreferrer noopener" }, inlineNodes(label === "" ? href : label, key, links)));
+					else if (section !== undefined) nodes.push(crosslink(key, href, label === "" ? href : label, links));
+					else nodes.push(h("span", { key, className: "dshwiki-deadlink", title: href }, label.length > 0 ? label : href));
+				} else if (match[11] !== undefined) {
+					// `[[page-id]]` is what `merge` and `deprecate` write into a
+					// body and what an agent writes by habit. Painting it as a dead
+					// `[[…]]` made a live reference look like a typo.
+					const target = match[12];
+					const alias = match[13];
+					const label = alias !== undefined && alias.length > 0 ? alias : target;
+					const section = links === undefined ? undefined : links.resolve(target);
+					if (section !== undefined) nodes.push(crosslink(key, target, label, links));
+					else nodes.push(h("span", { key, className: "dshwiki-deadlink", title: `${target} — no such page` }, label));
 				}
 				cursor = match.index + match[0].length;
 			}
@@ -356,7 +421,7 @@ window.__ModuleLoader__.load({
 		const ITEM_RE = /^\s*(?:[-*+]|\d+[.)])\s+(.*)$/;
 
 		/** A tiny line-based Markdown renderer: headings, code, lists, quotes, rules, paragraphs. */
-		function renderMarkdown(md) {
+		function renderMarkdown(md, links) {
 			const lines = md.split(/\r?\n/);
 			const out = [];
 			let i = 0;
@@ -385,7 +450,7 @@ window.__ModuleLoader__.load({
 					// h1 in the file becomes h2: the reader title owns h1.
 					const level = String(Math.min(heading[1].length + 1, 6));
 					const nodeKey = `b${String(key++)}`;
-					out.push(h(`h${level}`, { key: nodeKey }, inlineNodes(heading[2], nodeKey)));
+					out.push(h(`h${level}`, { key: nodeKey }, inlineNodes(heading[2], nodeKey, links)));
 					i += 1;
 					continue;
 				}
@@ -400,7 +465,7 @@ window.__ModuleLoader__.load({
 						inner.push(lines[i].replace(/^\s*>\s?/, ""));
 						i += 1;
 					}
-					out.push(h("blockquote", { key: `b${String(key++)}` }, ...renderMarkdown(inner.join("\n"))));
+					out.push(h("blockquote", { key: `b${String(key++)}` }, ...renderMarkdown(inner.join("\n"), links)));
 					continue;
 				}
 				if (ITEM_RE.test(line)) {
@@ -409,7 +474,7 @@ window.__ModuleLoader__.load({
 					while (i < lines.length && ITEM_RE.test(lines[i])) {
 						const itemKey = `li${String(key++)}`;
 						// A checkbox survives as a plain marker; phase 1 does not track state.
-						items.push(h("li", { key: itemKey }, inlineNodes(ITEM_RE.exec(lines[i])[1].replace(/^\[[ xX]\]\s+/, ""), itemKey)));
+						items.push(h("li", { key: itemKey }, inlineNodes(ITEM_RE.exec(lines[i])[1].replace(/^\[[ xX]\]\s+/, ""), itemKey, links)));
 						i += 1;
 					}
 					out.push(h(ordered ? "ol" : "ul", { key: `b${String(key++)}` }, ...items));
@@ -421,7 +486,7 @@ window.__ModuleLoader__.load({
 					i += 1;
 				}
 				const nodeKey = `b${String(key++)}`;
-				out.push(h("p", { key: nodeKey }, ...inlineNodes(paragraph.join(" "), nodeKey)));
+				out.push(h("p", { key: nodeKey }, ...inlineNodes(paragraph.join(" "), nodeKey, links)));
 			}
 			return out;
 		}
@@ -437,12 +502,17 @@ window.__ModuleLoader__.load({
 		}
 
 		/** One page row in a section list. */
-		function PageRow({ row, onOpen }) {
+		function PageRow({ row, onOpen, t }) {
+			const active = row.status === "active";
+			const isolated = active && (row.links ?? 0) === 0 && (row.backlinks ?? 0) === 0;
 			return h(
 				"button",
 				{ type: "button", className: "dshwiki-row", onClick: onOpen, title: `${row.title}\n${row.id}` },
 				h("span", { className: "dshwiki-row-title" }, row.title),
 				row.status !== "active" ? h("span", { className: "dshwiki-badge" }, row.status) : null,
+				(row.dangling ?? 0) > 0 ? h("span", { className: "dshwiki-gbadge dshwiki-gbadge-warn", title: t("graph.rowDangling") }, "!") : null,
+				isolated ? h("span", { className: "dshwiki-gbadge", title: t("graph.rowIsolated") }, "◇") : null,
+				!isolated && (row.backlinks ?? 0) > 0 ? h("span", { className: "dshwiki-gbadge", title: t("graph.rowBacklinks") }, String(row.backlinks)) : null,
 				h("span", { className: "dshwiki-row-date" }, DAY(row.updated)),
 			);
 		}
@@ -476,7 +546,9 @@ window.__ModuleLoader__.load({
 
 		/** Meta chips under a reader title. */
 		function MetaRow({ items }) {
-			const shown = items.filter((item) => item.value !== undefined && item.value !== null && item.value !== "" && !(Array.isArray(item.value) && item.value.length === 0));
+			const shown = items.filter(
+				(item) => item !== undefined && item !== null && item.value !== undefined && item.value !== null && item.value !== "" && !(Array.isArray(item.value) && item.value.length === 0),
+			);
 			if (shown.length === 0) return null;
 			return h(
 				"div",
@@ -487,8 +559,134 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		/** One page chip in a graph section: live when the tree knows the id. */
+		function GraphChip({ row, links, kind, className, title }) {
+			const known = links.resolve(row.id) !== undefined;
+			if (!known) return h("span", { key: `${kind}:${row.id}`, className: "dshwiki-gchip dshwiki-gchip-dead", title }, row.title);
+			return h(
+				"button",
+				{
+					type: "button",
+					key: `${kind}:${row.id}`,
+					className: `dshwiki-gchip${className === undefined ? "" : ` ${className}`}`,
+					title,
+					onClick: () => {
+						const section = links.resolve(row.id);
+						if (section !== undefined) links.open(row.id, section);
+					},
+				},
+				row.title,
+			);
+		}
+
+		/**
+		 * Where this page sits in the graph, under the body: what it claims, what
+		 * claims it, which of its edges point at nothing, and what the scorer
+		 * would nominate next. All of it is derived and read-only — the way to
+		 * change an edge is a write, not a click.
+		 */
+		function GraphPanel({ graph, links, t }) {
+			if (graph === undefined || graph === null) return null;
+			const outgoing = graph.outgoing ?? [];
+			const backlinks = graph.backlinks ?? [];
+			const dangling = graph.dangling ?? [];
+			const candidates = graph.candidates ?? [];
+			const citedBy = graph.referenced_by ?? [];
+			const blocks = [];
+			if (dangling.length > 0) {
+				blocks.push(
+					h(
+						"div",
+						{ key: "dangling", className: "dshwiki-graph dshwiki-graph-warn" },
+						h("h2", { className: "dshwiki-graph-h" }, t("graph.dangling")),
+						h(
+							"div",
+							{ className: "dshwiki-gchips" },
+							...dangling.map((edge) => h("span", { key: `dead:${edge.target}`, className: "dshwiki-gchip dshwiki-gchip-dead", title: edge.target }, edge.target)),
+						),
+						h("p", { className: "dshwiki-graph-note" }, t("graph.dangling.note")),
+					),
+				);
+			}
+			if (outgoing.length > 0) {
+				blocks.push(
+					h(
+						"div",
+						{ key: "out", className: "dshwiki-graph" },
+						h("h2", { className: "dshwiki-graph-h" }, t("graph.out")),
+						h(
+							"div",
+							{ className: "dshwiki-gchips" },
+							...outgoing.map((edge) =>
+								GraphChip({
+									row: { id: edge.target, title: edge.exists ? edge.title : edge.target },
+									links,
+									kind: "out",
+									className: edge.exists ? undefined : "dshwiki-gchip-dead",
+									title: edge.relation === undefined ? `→ ${edge.target}` : `→ ${edge.target} · ${edge.relation}`,
+								}),
+							),
+						),
+					),
+				);
+			}
+			if (backlinks.length > 0) {
+				blocks.push(
+					h(
+						"div",
+						{ key: "in", className: "dshwiki-graph" },
+						h("h2", { className: "dshwiki-graph-h" }, t("graph.in")),
+						h(
+							"div",
+							{ className: "dshwiki-gchips" },
+							...backlinks.map((edge) =>
+								GraphChip({ row: edge, links, kind: "in", title: edge.relation === undefined ? `← ${edge.id}` : `← ${edge.id} · ${edge.relation}` }),
+							),
+						),
+					),
+				);
+			}
+			if (citedBy.length > 0) {
+				blocks.push(
+					h(
+						"div",
+						{ key: "cited", className: "dshwiki-graph" },
+						h("h2", { className: "dshwiki-graph-h" }, t("graph.cited")),
+						h("div", { className: "dshwiki-gchips" }, ...citedBy.map((id) => GraphChip({ row: { id, title: id }, links, kind: "cited", title: id }))),
+					),
+				);
+			}
+			if (candidates.length > 0) {
+				blocks.push(
+					h(
+						"div",
+						{ key: "cand", className: "dshwiki-graph dshwiki-graph-cand" },
+						h("h2", { className: "dshwiki-graph-h" }, t("graph.candidates")),
+						h(
+							"div",
+							{ className: "dshwiki-gchips" },
+							...candidates.map((row) =>
+								GraphChip({
+									row,
+									links,
+									kind: "cand",
+									className: "dshwiki-gchip-cand",
+									title: `${row.score.toFixed(1)} · ${(row.shared ?? []).join(", ")}`,
+								}),
+							),
+						),
+						h("p", { className: "dshwiki-graph-note" }, t("graph.candidates.note")),
+					),
+				);
+			}
+			if (blocks.length === 0) return null;
+			return h("nav", { className: "dshwiki-graphs" }, ...blocks);
+		}
+
 		/** The reader for one live page. */
-		function PageReader({ page, t }) {
+		function PageReader({ page, links, t }) {
+			const graph = page.graph;
+			const safeLinks = links ?? { resolve: () => undefined, open: () => {} };
 			return h(
 				"article",
 				{ className: "dshwiki-article" },
@@ -500,11 +698,14 @@ window.__ModuleLoader__.load({
 						{ label: "status", value: page.status === "active" ? undefined : t(`status.${page.status}`) },
 						{ label: t("meta.tags"), value: page.tags },
 						{ label: t("meta.sources"), value: (page.sources ?? []).length === 0 ? undefined : (page.sources ?? []).length },
+						graph === undefined ? undefined : { label: t("meta.links"), value: (graph.outgoing ?? []).length },
+						graph === undefined ? undefined : { label: t("meta.backlinks"), value: (graph.backlinks ?? []).length },
 					],
 				}),
 				page.url !== undefined ? h("a", { className: "dshwiki-link", href: page.url, target: "_blank", rel: "noreferrer noopener" }, page.url) : null,
-				h("div", { className: "dshwiki-markdown" }, ...renderMarkdown(page.body)),
+				h("div", { className: "dshwiki-markdown" }, ...renderMarkdown(page.body, safeLinks)),
 				page.truncated ? h("p", { className: "dshwiki-note" }, t("meta.truncated")) : null,
+				GraphPanel({ graph, links: safeLinks, t }),
 			);
 		}
 
@@ -593,6 +794,17 @@ window.__ModuleLoader__.load({
 			// Reader view.
 			if (state.open !== null) {
 				const ref = state.open;
+				// A cross-page reference is a link only if the tree says a page by
+				// that id exists and which section holds it — data the pane already
+				// has, so a dead label never hides a real page.
+				const sectionOf = new Map();
+				for (const section of state.tree === null ? [] : state.tree.sections) {
+					for (const item of section.pages) if (!sectionOf.has(item.id)) sectionOf.set(item.id, section.kind);
+				}
+				const links = {
+					resolve: (id) => sectionOf.get(id),
+					open: (id, section) => open(tab.id, { section, id }, signal),
+				};
 				const back = h(
 					"button",
 					{ type: "button", className: "dshwiki-back", onClick: () => actions.opened(tab.id, null) },
@@ -609,7 +821,7 @@ window.__ModuleLoader__.load({
 						h("button", { type: "button", className: "dshwiki-tool", onClick: () => open(tab.id, ref, signal) }, t("retry")),
 					);
 				else if (ref.section === "staging") content = h(StagedReader, { entry: state.page.body.staged, t });
-				else content = h(PageReader, { page: state.page.body.page, t });
+				else content = h(PageReader, { page: state.page.body.page, links, t });
 				return root([header(back), h("div", { className: "dshwiki-body" }, content)]);
 			}
 
@@ -626,6 +838,20 @@ window.__ModuleLoader__.load({
 					: h(
 						React.Fragment,
 						null,
+						// The graph's heartbeat: one line saying whether this wiki is a
+						// web of pages or a pile of them.
+						tree.graph === undefined
+							? null
+							: h(
+									"p",
+									{ className: "dshwiki-graphsummary", title: t("graph.summaryTitle") },
+									t("graph.summary", {
+										pages: String(tree.graph.pages),
+										edges: String(tree.graph.edges),
+										dangling: String(tree.graph.dangling),
+										orphans: String(tree.graph.orphans),
+									}),
+								),
 						...tree.sections.map((section) =>
 							h(
 								Section,
@@ -640,7 +866,7 @@ window.__ModuleLoader__.load({
 								h(
 									"div",
 									{ className: "dshwiki-rows" },
-									...section.pages.map((row) => h(PageRow, { key: row.id, row, onOpen: () => openRef(section.kind, row.id) })),
+									...section.pages.map((row) => h(PageRow, { key: row.id, row, t, onOpen: () => openRef(section.kind, row.id) })),
 								),
 							),
 						),
@@ -740,6 +966,20 @@ window.__ModuleLoader__.load({
 			".dshwiki-markdown pre code{background:none;padding:0}",
 			".dshwiki-markdown a{text-decoration:underline;text-underline-offset:2px}",
 			".dshwiki-deadlink{opacity:.7;border-bottom:1px dotted currentColor}",
+			".dshwiki-crosslink{border:0;background:none;padding:0;font:inherit;color:inherit;cursor:pointer;text-decoration:underline;text-underline-offset:2px}",
+			".dshwiki-gbadge{flex:none;min-width:14px;font-size:10px;line-height:14px;text-align:center;border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.3));border-radius:999px;padding:0 4px;opacity:.7}",
+			".dshwiki-gbadge-warn{border-color:var(--dsw-alias-status-warning,#c60);opacity:.95}",
+			".dshwiki-graphsummary{margin:0 0 6px;padding:0 10px;font-size:11px;opacity:.55}",
+			".dshwiki-graphs{margin-top:18px;display:flex;flex-direction:column;gap:14px;border-top:1px dashed var(--dsw-alias-border-l3,rgba(128,128,128,.3));padding-top:10px}",
+			".dshwiki-graph-h{font-size:11px;font-weight:600;letter-spacing:.04em;opacity:.55;margin:0 0 6px}",
+			".dshwiki-graph-warn{border-left:2px solid var(--dsw-alias-status-warning,#c60);padding-left:10px}",
+			".dshwiki-graph-warn .dshwiki-graph-h{opacity:.9}",
+			".dshwiki-gchips{display:flex;flex-wrap:wrap;gap:6px}",
+			".dshwiki-gchip{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));border-radius:999px;padding:1px 9px;background:none;color:inherit;cursor:pointer;font-family:inherit}",
+			".dshwiki-gchip:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12))}",
+			".dshwiki-gchip-dead,.dshwiki-gchip-dead:hover{opacity:.55;border-style:dashed;cursor:default;background:none}",
+			".dshwiki-gchip-cand{border-style:dotted}",
+			".dshwiki-graph-note{margin:6px 0 0;font-size:11px;opacity:.6}",
 		].join("\n");
 
 		/* -------------------------------------------------------------- wiring */

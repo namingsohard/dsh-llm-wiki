@@ -17,6 +17,7 @@ Search → Understand → Abstract → Store → Reuse → Update
 - **写入闸门。** 默认 `approval: staging`：每条提案带着渲染好的摘要落到 `<wiki>/staging/`，`wiki_review` 端到你面前，批准之前什么都不生效；一旦驳回，这一批提案当场丢弃，队列不会悄悄越积越多。
 - **准入控制（Admission Controller）。** 每次 `create` 必须对 `reusability / stability / novelty / abstraction` 四维打分，临时性事实在提案阶段就被拒绝——Wiki 不会退化成流水账。
 - **增量变更。** `create / update / merge / link / deprecate` 最小改动；merge 留下重定向桩页；永不删除。
+- **自治维护的链接图。** 页面是节点，frontmatter 里的 `links:` 就是边——边永远即时派生、不单独存储。每次写入都会回报它对 Wiki 形态的影响：这批改动造成的悬空边、全库计数（边数 / 悬空 / 孤儿 / 孤立）、只针对这批页面的同款 lint，以及为这些页面**提名**的候选链接。插件只提名，边由你写。
 - **Knowledge Router。** 确定性的覆盖度判定（`none / low / partial / high`），每条命中附匹配证据：覆盖到就复用 wiki，没覆盖到就去联网。
 - **联网提醒。** 只查了网、没碰 wiki 的轮次，会有一条提醒被折进**下一步的输入**——轮次不会被延长，你的回答始终是本轮最后一条。
 - **侧栏浏览器。** 宿主带 Web 界面时，右侧 Sidebar 出现只读的「Wiki 记忆库」tab（目录树、Markdown 阅读、待审提案）。
@@ -75,7 +76,32 @@ wiki:
   approval: staging           # staging | inline | off
   maxStagedBytes: 65536       # 单条提案体积上限；超限直接拒绝，不截断
   nudge: next-step            # next-step | off
+  # 链接图
+  linkTargetCheck: warn       # warn | strict | off——指向不存在页面的链接怎么处理
+  linkSuggest: true           # 为正在写入的页面提名候选链接
+  linkSuggestLimit: 5         # 每个被改动页面的候选数上限
+  linkSuggestMinScore: 2      # 沿用 wiki_search 的分数量表
+  sourceEdges: true           # 把 `sources:` 当作图中的溯源边
+  wikiLinkEdges: false        # 从正文的 `[[page-id]]` 派生边（开启会改变 lint 输出）
+  graphExpansion: false       # 把命中页面的一跳邻居作为 `related` 附在 wiki_search 后面
+  graphExpansionLimit: 3
 ```
+
+## 链接图
+
+Wiki 本来就是图，而且不需要另建一份存储：边就是每页 frontmatter 里的 `links:`（`"target"` 或 `"target | relation"`），加上你打开之后的正文 `[[page-id]]` 提及与作为出处的 `sources:`。反链、悬空边、孤儿、孤立、邻居提名全部由这些页面即时算出——所以它永远不会与页面失同步，也不可能被迁移写坏。
+
+在此基础上，写入路径里没有任何模型调用，全部确定性地做这些事：
+
+| 位置 | 说清楚的事 |
+| --- | --- |
+| `wiki_mutate` → `graph` | 这批改动对图做了什么：全库计数、这批引入的悬空边、只覆盖这批页面的 lint 结论，以及 `suggestions`（带共享词的候选链接）。写入闸门**只提案**时同样给出（`preview: true`），所以断边在你批准之前就被点名。 |
+| `wiki_inspect` | `backlinks`（含关系）、本页 `dangling` 悬空边、`candidate_links`，源卡片还有 `referenced_by`。 |
+| `wiki_lint` | 同一套检查的全库扫描，另加 `unreferenced-source`：没人引用的出处卡片等于白存。 |
+| `wiki_search` | 可选 `related`：命中页面的一跳邻居，标明是被哪条边带到的。它**不参与覆盖度判定**——邻居是上下文，不是答案。 |
+| 侧栏阅读器 | 页面下方同样一幅图：它指向什么、谁指向它、死边、候选链接，正文里的 `[[id]]` 是可点的跨页链接。 |
+
+两条规则撑住整个设计。**提名不等于写入**：自动连一条边，孤儿检查就再也不报这页——而孤儿恰恰是「这页根本到不了」的唯一信号；何况那条关系没人核实过。**指向虚无的边是值得点名的缺陷**：默认照写并说清楚；把 `linkTargetCheck` 设为 `strict`，Wiki 就守住「不存在指向空的边」（同一批 create 创建的 id 算已存在，所以一个互联的小集群仍能一次写完）。
 
 ## 权限边界
 
@@ -91,6 +117,7 @@ src/
 ├── storage/                  页面格式、原子存储、staging 暂存区
 ├── retrieval/                新鲜度分档 + 支持 CJK 的关键词检索
 ├── router/                   覆盖度判定：复用 wiki 还是去获取
+├── graph/                    派生链接图 + 邻居提名
 ├── mutation/                 准入控制、审核摘要、五种变更操作
 ├── browser/                  供侧栏浏览器使用的只读 /wiki/* 路由
 ├── validator/                lint：重复 / 断链 / 过期 / 孤儿
@@ -98,7 +125,7 @@ src/
 └── tools/                    7 个模型可见工具
 client/wiki-client.js         手写浏览器 bundle（侧栏 Wiki tab）
 prompts/                      路由 / 抽取 / 变更 / 校验 playbook
-test/                         vitest 测试（132 个，含宿主兼容性契约测试）
+test/                         vitest 测试（173 个，含宿主兼容性契约测试）
 ```
 
 更深的设计论证（源层为何只存链接、常驻提示词为何字节稳定、提醒为何走下一步输入）见 `DSH-Wiki_Project_Blueprint.md` 与 `prompts/` 下的 playbooks。
@@ -109,7 +136,7 @@ test/                         vitest 测试（132 个，含宿主兼容性契约
 pnpm install
 pnpm build        # tsc -> lib/（已提交，DSH 直接加载）
 pnpm typecheck
-pnpm test         # vitest，132 个测试
+pnpm test         # vitest，173 个测试
 pnpm smoke        # 对构建产物跑端到端
 pnpm prompt:size  # 常驻提示词的体积守卫
 ```

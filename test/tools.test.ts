@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { apply, name as pluginName, inject } from '../src/index.js';
 import { createPromptSource, observeWiki, type WikiPromptStats } from '../src/prompt.js';
 import { StagingQueue } from '../src/storage/staging.js';
+import { WikiStore } from '../src/storage/markdown-store.js';
 
 interface RecordedTool {
   name: string;
@@ -272,8 +273,102 @@ describe('wiki_lint tool', () => {
   });
 });
 
-describe('wiki_guide', () => {
-  it('serves each playbook verbatim on demand', async () => {
+describe('graph feedback through the tools', () => {
+  const LOD = { op: 'create', id: 'lod', title: 'Character LOD distance', tags: ['rendering'], body: 'Distance LOD thresholds; FOV compensation changes them.', admission: GOOD_ADMISSION };
+  const FOV = { op: 'create', id: 'fov', title: 'FOV compensation', tags: ['rendering'], body: 'FOV compensation widens or narrows the rendered view.', admission: GOOD_ADMISSION };
+
+  /** Put a page on disk directly, so a gated test can talk about a live wiki. */
+  async function seedLive(root: string, page: typeof LOD): Promise<void> {
+    const store = new WikiStore(root);
+    await store.ensureInit();
+    const now = new Date().toISOString();
+    await store.writePage({
+      id: page.id,
+      kind: 'concept',
+      title: page.title,
+      status: 'active',
+      revision: 1,
+      created: now,
+      updated: now,
+      tags: [...page.tags],
+      links: [],
+      sources: [],
+      body: `${page.body}\n`,
+      path: '',
+    });
+  }
+
+  it('names the hole in the same call that made it', async () => {
+    await wiki.call('wiki_mutate', { operations: [FOV] });
+    const outcome = await wiki.call('wiki_mutate', { operations: [{ ...LOD, links: ['ghost-page'] }] });
+    expect(outcome.graph.preview).toBe(false);
+    expect(outcome.graph.stats.edges).toBeGreaterThanOrEqual(1);
+    expect(outcome.graph.dangling.map((edge: { target: string }) => edge.target)).toEqual(['ghost-page']);
+    expect(outcome.graph.findings.some((issue: { check: string }) => issue.check === 'broken-link')).toBe(true);
+    expect(outcome.graph.suggestions.find((entry: { id: string }) => entry.id === 'lod')?.candidates.map((row: { id: string }) => row.id)).toEqual(['fov']);
+    expect(outcome.note).toContain('dangling');
+  });
+
+  it('says the same thing about a gated batch before anything is written', async () => {
+    const gated = await makeWiki({ approval: 'staging' });
+    try {
+      await seedLive(gated.root, FOV);
+      const staged = await gated.call('wiki_mutate', { operations: [{ ...LOD, links: ['ghost-page'] }] });
+      expect(staged.applied).toBe(0);
+      expect(staged.staged).toBe(1);
+      expect(staged.graph.preview).toBe(true);
+      expect(staged.graph.dangling.map((edge: { target: string }) => edge.target)).toEqual(['ghost-page']);
+      expect(staged.results[0]?.detail).toContain('do not exist');
+      expect(staged.results[0]?.detail).toContain('candidate link');
+    } finally {
+      await rm(gated.root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to write a doomed edge when linkTargetCheck is strict', async () => {
+    const strict = await makeWiki({ approval: 'off', linkTargetCheck: 'strict' });
+    try {
+      const refused = await strict.call('wiki_mutate', { operations: [{ ...LOD, links: ['ghost-page'] }] });
+      expect(refused.results[0]?.status).toBe('rejected');
+      expect(refused.results[0]?.detail).toContain('ghost-page');
+    } finally {
+      await rm(strict.root, { recursive: true, force: true });
+    }
+  });
+
+  it('lets wiki_inspect answer whether a page is wired into the graph', async () => {
+    await wiki.call('wiki_mutate', { operations: [LOD, FOV] });
+    await wiki.call('wiki_mutate', { operations: [{ op: 'link', id: 'lod', to_id: 'fov', relation: 'depends on' }] });
+    const target = await wiki.call('wiki_inspect', { id: 'fov' });
+    expect(target.inbound).toEqual(['lod']);
+    expect(target.backlinks).toEqual([{ id: 'lod', title: 'Character LOD distance', kind: 'concept', via: 'link', relation: 'depends on' }]);
+    const source = await wiki.call('wiki_inspect', { id: 'lod' });
+    expect(source.candidate_links.length).toBeGreaterThanOrEqual(0);
+    expect(source.referenced_by).toEqual([]);
+    expect(source.dangling).toHaveLength(0);
+  });
+
+  it('appends graph neighbours to wiki_search only when the switch is on', async () => {
+    const plain = await wiki.call('wiki_search', { query: 'Character LOD distance' });
+    expect(plain.related).toEqual([]);
+
+    const walking = await makeWiki({ approval: 'off', graphExpansion: true });
+    try {
+      await walking.call('wiki_mutate', { operations: [LOD, FOV] });
+      await walking.call('wiki_mutate', { operations: [{ op: 'link', id: 'lod', to_id: 'fov' }] });
+      const value = await walking.call('wiki_search', { query: 'Character LOD thresholds' });
+      expect(value.hits.map((hit: { id: string }) => hit.id)).toEqual(['lod']);
+      expect(value.related.map((row: { id: string }) => row.id)).toEqual(['fov']);
+      expect(value.related[0].via).toEqual(['lod']);
+      // A neighbour is context: coverage is still what the hits alone justify.
+      expect(value.coverage).toBe('high');
+    } finally {
+      await rm(walking.root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('wiki_guide', () => {  it('serves each playbook verbatim on demand', async () => {
     const router = await wiki.call('wiki_guide', { topic: 'router' });
     expect(router.found).toBe(true);
     expect(router.playbook).toContain('Knowledge Router');

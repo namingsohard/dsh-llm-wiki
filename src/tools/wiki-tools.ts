@@ -7,6 +7,10 @@ import { StagingQueue, type StagedEntry } from '../storage/staging.js';
 import { searchWiki } from '../retrieval/grep-retriever.js';
 import { routeQuery } from '../router/knowledge-router.js';
 import type { Mutator } from '../mutation/mutator.js';
+import { describeGraph, type GraphFeedback } from '../mutation/mutator.js';
+import { WikiGraph, type DanglingEdge, type GraphStats } from '../graph/graph.js';
+import type { NeighborSuggestion } from '../graph/suggest.js';
+import { graphOptionsOf } from '../validator/checks.js';
 import { assertAdmissionScores, evaluateAdmission } from '../mutation/admission.js';
 import { clampInline, renderApprovalPitch, renderOpPitch, renderSourcePitch, type ApprovalLine } from '../mutation/pitch.js';
 import { GUIDE_TOPICS, observeStaging, observeWiki, readPlaybook, type WikiPromptStats } from '../prompt.js';
@@ -57,6 +61,29 @@ export interface ToolsHost {
 
 function text(value: unknown): { type: 'text'; text: string }[] {
   return [{ type: 'text', text: JSON.stringify(value, null, 2) }];
+}
+
+/** The write-path graph feedback, in wire shape (one place, three call sites). */
+interface GraphPayload {
+  preview: boolean;
+  summary: string;
+  stats: GraphStats;
+  dangling: DanglingEdge[];
+  suggestions: { id: string; candidates: NeighborSuggestion[] }[];
+  findings: { check: string; level: string; page: string; message: string }[];
+  notes: string[];
+}
+
+function graphPayload(feedback: GraphFeedback): GraphPayload {
+  return {
+    preview: feedback.preview,
+    summary: describeGraph(feedback),
+    stats: feedback.stats,
+    dangling: feedback.dangling,
+    suggestions: feedback.suggestions,
+    findings: feedback.findings.map((issue) => ({ check: issue.check, level: issue.level, page: issue.page, message: issue.message })),
+    notes: feedback.notes,
+  };
 }
 
 /** Fields the tool runtime hands to `execute` that the typed signature hides. */
@@ -306,6 +333,25 @@ export function registerWikiTools(
             next_step: { type: 'string', required: true, description: 'The concrete call(s) this verdict points at; on partial it branches on your judgement of the top hit.' },
             guide_topic: { type: 'string', required: true, description: 'wiki_guide topic holding the detail this verdict needs.' },
             total_pages: { type: 'integer', required: true },
+            related: {
+              type: 'array',
+              required: true,
+              description: 'One-hop graph neighbors of the hits (only when wiki.graphExpansion is on). Context, never coverage: do not report these as answers.',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  id: { type: 'string', required: true },
+                  kind: { type: 'string', required: true },
+                  title: { type: 'string', required: true },
+                  status: { type: 'string', required: true },
+                  score: { type: 'number', required: true, description: 'Relevance to the query; 0 means it came in purely through the edge.' },
+                  snippet: { type: 'string', required: true },
+                  via: { type: 'array', required: true, items: { type: 'string' }, description: 'Which hit(s) this page is one edge away from.' },
+                  relation: { type: 'string' },
+                },
+              },
+            },
           },
         },
         render: (_args, value) => text(value),
@@ -325,6 +371,7 @@ export function registerWikiTools(
           includeDeprecated: args.include_deprecated ?? false,
           agingAfterDays: config.agingAfterDays,
           staleAfterDays: config.staleAfterDays,
+          ...(config.graphExpansion ? { expand: { limit: config.graphExpansionLimit, graph: graphOptionsOf(config) } } : {}),
         });
         const decision = routeQuery(result.hits, args.query);
         await refreshCounts(store, staging, stats, ctx.logger);
@@ -347,6 +394,16 @@ export function registerWikiTools(
           next_step: decision.nextStep,
           guide_topic: decision.guideTopic,
           total_pages: result.scanned,
+          related: result.related.map((hit) => ({
+            id: hit.id,
+            kind: hit.kind,
+            title: hit.title,
+            status: hit.status,
+            score: hit.score,
+            snippet: hit.snippet,
+            via: hit.via,
+            ...(hit.relation === undefined ? {} : { relation: hit.relation }),
+          })),
         };
       },
       presentCall: (args) => ({ card: 'generic', title: `Wiki search: ${args.query}`, kind: 'search' }),
@@ -357,7 +414,7 @@ export function registerWikiTools(
     defineTool({
       name: 'wiki_inspect',
       description:
-        'Read one wiki page in full: frontmatter (status, revision, timestamps, tags, links, source ids), body, inbound links, and resolved source metadata. Use after wiki_search hits to reuse knowledge and trace it to its sources.',
+        'Read one wiki page in full: frontmatter (status, revision, timestamps, tags, links, source ids), body, backlinks with their relation labels, any edge of this page that points at a page that does not exist, and — for a wiki page — the candidate links the scorer would nominate. Use after wiki_search hits to reuse knowledge, judge whether the page is wired into the graph, and trace it to its sources.',
       parameters: {
         id: { type: 'string', required: true, description: 'Page id from wiki_search or index.md.' },
       },
@@ -370,6 +427,52 @@ export function registerWikiTools(
             id: { type: 'string', required: true },
             page: { type: 'json', required: true, description: 'Full page object, or null when not found.' },
             inbound: { type: 'array', required: true, items: { type: 'string' } },
+            backlinks: {
+              type: 'array',
+              required: true,
+              description: 'Pages that reach this one, with the relation they claim. `via` says whether the edge is a declared link or a [[id]] mention.',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  id: { type: 'string', required: true },
+                  title: { type: 'string', required: true },
+                  kind: { type: 'string', required: true },
+                  via: { type: 'string', required: true },
+                  relation: { type: 'string' },
+                },
+              },
+            },
+            dangling: {
+              type: 'array',
+              required: true,
+              description: 'This page’s own edges whose target no longer exists — fix them with op "link" or by creating the target.',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  target: { type: 'string', required: true },
+                  kind: { type: 'string', required: true },
+                  relation: { type: 'string' },
+                },
+              },
+            },
+            candidate_links: {
+              type: 'array',
+              required: true,
+              description: 'Nominated links for this page: same scorer as wiki_search, evidence included. A nomination is not a fact — verify, then write the ones that hold with op "link".',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  id: { type: 'string', required: true },
+                  title: { type: 'string', required: true },
+                  score: { type: 'number', required: true },
+                  shared: { type: 'array', required: true, items: { type: 'string' } },
+                },
+              },
+            },
+            referenced_by: { type: 'array', required: true, items: { type: 'string' }, description: 'For a source card: the pages that cite it. Empty for other kinds.' },
             sources: {
               type: 'array',
               required: true,
@@ -393,7 +496,19 @@ export function registerWikiTools(
       async execute(args, exec) {
         await store.ensureInit();
         exec.signal?.throwIfAborted();
-        const empty = { found: false, id: args.id, page: null, inbound: [] as string[], sources: [] as { id: string; title: string; url: string | null }[], truncated: false, note: '' };
+        const empty = {
+          found: false,
+          id: args.id,
+          page: null,
+          inbound: [] as string[],
+          backlinks: [] as { id: string; title: string; kind: string; via: string; relation?: string }[],
+          dangling: [] as { target: string; kind: string; relation?: string }[],
+          candidate_links: [] as { id: string; title: string; score: number; shared: string[] }[],
+          referenced_by: [] as string[],
+          sources: [] as { id: string; title: string; url: string | null }[],
+          truncated: false,
+          note: '',
+        };
         if (!/^[a-z0-9][a-z0-9._-]{0,79}$/.test(args.id)) {
           return { ...empty, note: 'invalid page id' };
         }
@@ -402,7 +517,30 @@ export function registerWikiTools(
           return { ...empty, note: `no wiki page "${args.id}"` };
         }
         const { pages } = await store.listPages(['concept', 'entity', 'source']);
-        const inbound = pages.filter((other) => other.id !== page.id && other.links.some((link) => link.target === page.id)).map((other) => other.id);
+        const graph = WikiGraph.fromPages(pages, graphOptionsOf(config));
+        const incoming = graph.incoming(page.id, graph.options.wikiLinkEdges ? ['link', 'wikilink'] : ['link']);
+        const inbound = [...new Set(incoming.map((edge) => edge.from))].filter((from) => from !== page.id).sort();
+        const backlinks: { id: string; title: string; kind: string; via: string; relation?: string }[] = [];
+        for (const edge of incoming) {
+          const from = graph.get(edge.from);
+          if (from === undefined || from.id === page.id) continue;
+          const row: { id: string; title: string; kind: string; via: string; relation?: string } = { id: from.id, title: from.title, kind: from.kind, via: edge.kind };
+          if (edge.relation !== undefined) row.relation = edge.relation;
+          if (!backlinks.some((existing) => existing.id === from.id && existing.via === edge.kind && (existing.relation ?? '') === (edge.relation ?? ''))) backlinks.push(row);
+        }
+        backlinks.sort((a, b) => a.id.localeCompare(b.id));
+        const dangling = graph
+          .danglingOf(page.id)
+          .map((edge) => {
+            const row: { target: string; kind: string; relation?: string } = { target: edge.target, kind: edge.kind };
+            if (edge.relation !== undefined) row.relation = edge.relation;
+            return row;
+          })
+          .sort((a, b) => a.target.localeCompare(b.target));
+        const candidate_links = mutator
+          .suggestionsFor(page, graph)
+          .map((candidate) => ({ id: candidate.id, title: candidate.title, score: candidate.score, shared: candidate.shared }));
+        const referenced_by = page.kind === 'source' ? graph.referencedBy(page.id) : [];
         const sourcePages = await Promise.all(page.sources.map(async (sid) => (isValid(sid) ? await store.read(sid) : undefined)));
         const sources: { id: string; title: string; url: string | null }[] = sourcePages.map((sp) =>
           sp === undefined ? { id: 'unresolved', title: 'missing source page', url: null } : { id: sp.id, title: sp.title, url: sp.url ?? null },
@@ -431,6 +569,10 @@ export function registerWikiTools(
             body,
           },
           inbound,
+          backlinks,
+          dangling,
+          candidate_links,
+          referenced_by,
           sources,
           truncated,
           note: truncated ? `body truncated at ${config.maxInspectBytes} bytes` : '',
@@ -573,6 +715,96 @@ export function registerWikiTools(
             pending_total: { type: 'integer', required: true, description: 'All entries now waiting in staging/.' },
             index_rebuilt: { type: 'boolean', required: true },
             note: { type: 'string', required: true },
+            graph: {
+              type: 'object',
+              required: true,
+              additionalProperties: false,
+              description: 'What this batch did to (or would do to) the link graph. `preview: true` means nothing was written yet — the write gate held the batch.',
+              properties: {
+                preview: { type: 'boolean', required: true },
+                summary: { type: 'string', required: true, description: 'One line: edges, dangling, orphans, and the advice worth acting on.' },
+                stats: {
+                  type: 'object',
+                  required: true,
+                  additionalProperties: false,
+                  properties: {
+                    pages: { type: 'integer', required: true },
+                    edges: { type: 'integer', required: true },
+                    dangling: { type: 'integer', required: true },
+                    orphans: { type: 'integer', required: true, description: 'Active wiki pages nothing links to.' },
+                    isolated: { type: 'integer', required: true, description: 'Active wiki pages that link to nothing.' },
+                    byKind: {
+                      type: 'object',
+                      required: true,
+                      additionalProperties: false,
+                      properties: {
+                        link: { type: 'integer', required: true },
+                        wikilink: { type: 'integer', required: true },
+                        source: { type: 'integer', required: true },
+                      },
+                    },
+                  },
+                },
+                dangling: {
+                  type: 'array',
+                  required: true,
+                  description: 'Edges on the touched pages whose target does not exist. Fix them with op "link" once the target exists, or drop them.',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      page: { type: 'string', required: true },
+                      target: { type: 'string', required: true },
+                      kind: { type: 'string', required: true, description: 'link | wikilink | source.' },
+                      relation: { type: 'string' },
+                    },
+                  },
+                },
+                suggestions: {
+                  type: 'array',
+                  required: true,
+                  description: 'Candidate links for the touched pages. Nominations only: judge each one, then write the ones that hold with op "link".',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      id: { type: 'string', required: true, description: 'The touched page the candidates are for.' },
+                      candidates: {
+                        type: 'array',
+                        required: true,
+                        items: {
+                          type: 'object',
+                          additionalProperties: false,
+                          properties: {
+                            id: { type: 'string', required: true },
+                            title: { type: 'string', required: true },
+                            kind: { type: 'string', required: true },
+                            score: { type: 'number', required: true },
+                            shared: { type: 'array', required: true, items: { type: 'string' }, description: 'Terms the two pages share — the evidence behind the nomination.' },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+                findings: {
+                  type: 'array',
+                  required: true,
+                  description: 'wiki_lint checks over the touched pages only: the same findings a later wiki_lint would report.',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      check: { type: 'string', required: true },
+                      level: { type: 'string', required: true },
+                      page: { type: 'string', required: true },
+                      message: { type: 'string', required: true },
+                    },
+                  },
+                },
+                notes: { type: 'array', required: true, items: { type: 'string' } },
+              },
+            },
           },
         },
         render: (_args, value) => text(value),
@@ -595,11 +827,26 @@ export function registerWikiTools(
               pending_total: 0,
               index_rebuilt: false,
               note: why,
+              graph: graphPayload(await mutator.previewGraph(ops)),
             };
           }
         }
 
         if (gated && config.approval === 'staging') {
+          // A proposal is the last cheap moment to say "that edge would dangle".
+          const preview = await mutator.previewGraph(ops);
+          const danglingByPage = new Map<string, string[]>();
+          for (const edge of preview.dangling) danglingByPage.set(edge.page, [...(danglingByPage.get(edge.page) ?? []), edge.target]);
+          const candidatesById = new Map(preview.suggestions.map((entry) => [entry.id, entry.candidates]));
+          const graphNoteFor = (id: string): string => {
+            const parts: string[] = [];
+            const missing = danglingByPage.get(id);
+            if (missing !== undefined && missing.length > 0) parts.push(`links to page(s) that do not exist: ${missing.join(', ')}`);
+            const candidates = candidatesById.get(id);
+            if (candidates !== undefined && candidates.length > 0) parts.push(`${candidates.length} candidate link(s) in graph.suggestions`);
+            return parts.length === 0 ? '' : ` · ${parts.join(' · ')}`;
+          };
+
           const rows: MutateRow[] = [];
           let rejected = 0;
           for (const [index, op] of ops.entries()) {
@@ -612,6 +859,11 @@ export function registerWikiTools(
             };
             if (bytes > config.maxStagedBytes) {
               refuse('rejected', `payload is ${bytes} bytes, over maxStagedBytes ${config.maxStagedBytes} — condense the page before proposing it`);
+              continue;
+            }
+            const missing = danglingByPage.get(id) ?? [];
+            if (config.linkTargetCheck === 'strict' && missing.length > 0) {
+              refuse('rejected', `link target(s) do not exist: ${missing.join(', ')} — create the target(s) first, or set wiki.linkTargetCheck to "warn"`);
               continue;
             }
             let admission: StagedEntry['admission'];
@@ -641,7 +893,7 @@ export function registerWikiTools(
               ...(op.admission !== undefined ? { scores: { ...op.admission } } : {}),
               ...(admission !== undefined ? { admission } : {}),
             });
-            rows.push({ index, op: op.op, id, status: 'staged', staged: true, staged_as: entry.id, detail: entry.pitch });
+            rows.push({ index, op: op.op, id, status: 'staged', staged: true, staged_as: entry.id, detail: `${entry.pitch}${graphNoteFor(id)}` });
           }
           const pendingTotal = (await staging.list()).entries.length;
           observeStaging(stats, pendingTotal);
@@ -654,6 +906,7 @@ export function registerWikiTools(
             pending_total: pendingTotal,
             index_rebuilt: false,
             note,
+            graph: graphPayload(preview),
           };
         }
 
@@ -674,7 +927,8 @@ export function registerWikiTools(
           staged: 0,
           pending_total: stats.pending,
           index_rebuilt: outcome.indexRebuilt,
-          note: outcome.applied > 0 ? `${outcome.applied} op(s) applied to the live wiki` : 'no op applied',
+          note: outcome.applied > 0 ? `${outcome.applied} op(s) applied to the live wiki — ${describeGraph(outcome.graph)}` : 'no op applied',
+          graph: graphPayload(outcome.graph),
         };
       },
       presentCall: (args) => ({ card: 'generic', title: `Wiki mutation (${args.operations.length} op${args.operations.length === 1 ? '' : 's'})`, kind: 'edit' }),
@@ -685,7 +939,7 @@ export function registerWikiTools(
     defineTool({
       name: 'wiki_lint',
       description:
-        'Run deterministic quality checks over the wiki: duplicate pages, broken links, stale knowledge, orphan pages, links to deprecated/merged pages, oversize pages, and unparseable files. Report-only — fix findings through wiki_mutate. Run after mutation batches and before trusting an old wiki section.',
+        'Run deterministic quality checks over the wiki: duplicate pages, broken links (including [[id]] mentions when that edge family is enabled), stale knowledge, orphan pages, links to deprecated/merged pages, source cards nobody cites, oversize pages, and unparseable files. Report-only — fix findings through wiki_mutate. wiki_mutate already runs these checks over the pages it touched, so run this to sweep the whole corpus: after a batch, and before trusting an old wiki section.',
       parameters: {
         include_info: { type: 'boolean', description: 'Include info-level findings (default true). Set false for warnings only.' },
       },
@@ -919,7 +1173,7 @@ export function registerWikiTools(
           const op = entry.payload as MutationOp;
           const outcomeOfOne = await mutator.apply([op]);
           const row = outcomeOfOne.results[0];
-          results.push({ id: entry.id, status: row?.status ?? 'error', detail: row?.detail ?? 'no result' });
+          results.push({ id: entry.id, status: row?.status ?? 'error', detail: `${row?.detail ?? 'no result'}${row?.status === 'applied' ? ` · ${describeGraph(outcomeOfOne.graph)}` : ''}` });
           if (row !== undefined && row.status === 'applied') applied++;
           else rejected++;
         }

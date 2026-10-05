@@ -25,6 +25,23 @@ Rules of the layer:
 - Batch a task's mutations in ONE `wiki_mutate` call; each operation reports
   applied / noop / rejected / error independently.
 
+Every write answers with `graph`, because a write is where a page gains edges:
+- `stats` is the whole wiki's shape: `edges` by family, `dangling`, `orphans`
+  (nothing points at them) and `isolated` (they point at nothing).
+- `dangling` lists the edges on the pages you touched that answer to nothing.
+  Create the target in the same batch (ids this batch creates count as
+  existing) or drop the edge. `linkTargetCheck: "strict"` refuses such a write
+  outright; the default `warn` writes and names it.
+- `suggestions` are candidate links for those pages, with the shared terms that
+  earned each nomination. A nomination is a question, not an answer: open the
+  page, then write only the relation you would defend, with op `link`. The
+  plugin never writes an edge nobody asked for — an auto-linked page stops
+  looking like an orphan, and that is exactly the signal you want to keep.
+- `findings` are the `wiki_lint` checks over the touched pages, so a defect is
+  visible the moment you make it, not in some later sweep.
+- A `notes` line about "no outgoing edge" is the graph telling you the page will
+  be unreachable: link it on purpose, or merge it into where it belongs.
+
 The write gate (`wiki.approval`, default `staging`):
 - A gated call answers `staged` per op and writes nothing live. Read back
   `staged_as` — that pending id is what later gets promoted.

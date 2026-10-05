@@ -17,6 +17,7 @@ The design follows Andrej Karpathy's ["LLM Wiki"](https://gist.github.com/karpat
 - **Write gate.** Default `approval: staging`: proposals land in `<wiki>/staging/` with a rendered pitch; `wiki_review` puts them in front of you, and nothing is live until you approve. Declining a review discards the proposals it covered — the queue does not quietly accumulate.
 - **Admission Controller.** Every `create` must score `reusability / stability / novelty / abstraction`; transient facts are refused at proposal time, so the wiki never becomes a log dump.
 - **Incremental mutation.** `create / update / merge / link / deprecate` with minimal diffs; merges leave redirect stubs; nothing is deleted.
+- **Self-maintaining link graph.** Pages are nodes, frontmatter `links:` are edges — derived, never stored. Every write answers with what it did to the shape of the wiki: dangling edges on the pages it touched, corpus counts (edges / dangling / orphans / isolated), the same lint checks scoped to those pages, and candidate links nominated for them. The plugin nominates; only you write an edge.
 - **Knowledge Router.** Deterministic coverage verdicts (`none / low / partial / high`) with per-hit match evidence: reuse the wiki when it is covered, go to the web when it is not.
 - **Web-access nudge.** A turn that browsed the web without touching the wiki gets one reminder folded into the *next step's input* — the turn is never extended.
 - **Sidebar browser.** On hosts with a web surface, a read-only "Wiki memory" tab on the right Sidebar (tree, page reader, staged proposals).
@@ -75,7 +76,32 @@ wiki:
   approval: staging           # staging | inline | off
   maxStagedBytes: 65536       # per-proposal cap; oversized bodies are refused
   nudge: next-step            # next-step | off
+  # link graph
+  linkTargetCheck: warn       # warn | strict | off — a link to a page that does not exist
+  linkSuggest: true           # nominate candidate links for a page being written
+  linkSuggestLimit: 5         # candidates per touched page
+  linkSuggestMinScore: 2      # floor on the wiki_search score scale
+  sourceEdges: true           # treat "sources:" as provenance edges of the graph
+  wikiLinkEdges: false        # derive edges from [[page-id]] mentions (changes lint output)
+  graphExpansion: false       # append one-hop neighbours to wiki_search as `related`
+  graphExpansionLimit: 3
 ```
+
+## The link graph
+
+A wiki is a graph, and this one needs no separate store: the edges are the `links:` entries in each page's frontmatter (`"target"` or `"target | relation"`), plus — when you turn them on — `[[page-id]]` mentions in a body and the `sources:` refs that ground a page. Everything else (backlinks, dangling edges, orphans, neighbour nominations) is computed from those pages, so it can never drift out of sync and no migration can corrupt it.
+
+What the plugin then does with it, all deterministically and with no model call in the write path:
+
+| where | what it says |
+| --- | --- |
+| `wiki_mutate` → `graph` | what this batch did to the graph: corpus counts, the dangling edges it introduced, the scoped lint findings, and `suggestions` — candidate links with the shared terms that earned them. Also filled for a batch the write gate is only *proposing* (`preview: true`), so a doomed edge is named before you approve it. |
+| `wiki_inspect` | `backlinks` with their relations, `dangling` edges of this page, `candidate_links`, and `referenced_by` for a source card. |
+| `wiki_lint` | the same checks as a corpus sweep, plus `unreferenced-source`: a card nobody cites was saved for nothing. |
+| `wiki_search` | optionally `related`: one-hop neighbours of the hits, marked with the edge that reached them. Never counted as coverage — a neighbour is context, not an answer. |
+| sidebar reader | the same picture under the page: what it claims, what claims it, dead edges, candidates, and `[[id]]` mentions as live links. |
+
+Two rules hold the design in shape. **Nomination is not writing**: an auto-linked page stops looking like an orphan, so an automatic edge disarms exactly the check that tells you a page is unreachable — and it asserts a relation nobody verified. **An edge to nothing is a defect worth naming**: by default a write applies and says so; set `linkTargetCheck: strict` to hold the wiki to "no edge points at nothing" (ids created by the same batch count as existing, so a linked cluster can still land in one call).
 
 ## Privilege boundary
 
@@ -91,6 +117,7 @@ src/
 ├── storage/                  page format, atomic markdown store, staging area
 ├── retrieval/                freshness buckets + CJK-aware keyword retriever
 ├── router/                   coverage verdict: reuse the wiki or go acquire
+├── graph/                    derived link graph + neighbour nomination
 ├── mutation/                 admission, review pitches, the five ops
 ├── browser/                  read-only /wiki/* routes for the sidebar browser
 ├── validator/                lint: duplicates, broken links, stale, orphans
@@ -98,7 +125,7 @@ src/
 └── tools/                    the seven model-facing tools
 client/wiki-client.js         hand-written browser bundle (sidebar Wiki tab)
 prompts/                      router / extraction / mutation / validation playbooks
-test/                         vitest suites (132 tests, incl. the host-compatibility contract)
+test/                         vitest suites (173 tests, incl. the host-compatibility contract)
 ```
 
 Deep design notes (why link-only sources, why the resident prompt is byte-stable, why the nudge rides the next step) live in `DSH-Wiki_Project_Blueprint.md` and the playbooks under `prompts/`.
@@ -109,7 +136,7 @@ Deep design notes (why link-only sources, why the resident prompt is byte-stable
 pnpm install
 pnpm build        # tsc -> lib/ (committed; DSH loads it directly)
 pnpm typecheck
-pnpm test         # vitest, 132 tests
+pnpm test         # vitest, 173 tests
 pnpm smoke        # end-to-end passes against the built artifact
 pnpm prompt:size  # guard the resident-prompt byte budget
 ```

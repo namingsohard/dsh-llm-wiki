@@ -1,7 +1,7 @@
 {
   "name": "dsh-llm-wiki",
-  "version": "0.2.1",
-  "description": "Agent semantic memory for DeepSeek Harness: a file-based Markdown wiki with knowledge routing, incremental mutation, and linting.",
+  "version": "0.3.0",
+  "description": "Agent semantic memory for DeepSeek Harness: a file-based Markdown wiki with knowledge routing, incremental mutation, a self-maintaining link graph, and linting.",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",

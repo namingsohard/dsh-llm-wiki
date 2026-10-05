@@ -30,6 +30,16 @@ export type WikiApprovalMode = 'staging' | 'inline' | 'off';
  */
 export type WikiNudgeMode = 'next-step' | 'off';
 
+/**
+ * How the write path treats a link whose target no page answers (a dangling
+ * edge). See `docs/proposal-graph-maintenance.md` (G2).
+ * - `warn`: apply the write and name the dangling edge in the result. The default.
+ * - `strict`: refuse the write; ids created earlier in the same batch count as
+ *   existing, so a batch may still introduce a cluster of linked pages.
+ * - `off`: stay silent (the v0.2 behaviour).
+ */
+export type LinkTargetCheck = 'warn' | 'strict' | 'off';
+
 /** Fully-resolved plugin configuration. */
 export interface WikiConfig {
   /** Absolute-or-empty wiki root. Empty means "auto-resolve" (see {@link resolveWikiRoot}). */
@@ -60,6 +70,22 @@ export interface WikiConfig {
   maxStagedBytes: number;
   /** Reminder folded into the next step after a turn browsed the web without the wiki. */
   nudge: WikiNudgeMode;
+  /** How the write path handles a link target that no page answers. */
+  linkTargetCheck: LinkTargetCheck;
+  /** Nominate candidate links for a page being created or updated (never auto-written). */
+  linkSuggest: boolean;
+  /** Cap on nominated candidates per touched page. */
+  linkSuggestLimit: number;
+  /** A candidate must score at least this on the `wiki_search` scale to be nominated. */
+  linkSuggestMinScore: number;
+  /** Treat `sources:` refs as provenance edges in the derived graph. */
+  sourceEdges: boolean;
+  /** Derive edges from `[[page-id]]` mentions in bodies (opt-in: it changes lint output). */
+  wikiLinkEdges: boolean;
+  /** Let `wiki_search` surface one-hop graph neighbors of what it matched. */
+  graphExpansion: boolean;
+  /** Cap on graph-expanded neighbors appended to a `wiki_search` result. */
+  graphExpansionLimit: number;
 }
 
 export const DEFAULT_CONFIG: WikiConfig = {
@@ -77,6 +103,14 @@ export const DEFAULT_CONFIG: WikiConfig = {
   approval: 'staging',
   maxStagedBytes: 64 * 1024,
   nudge: 'next-step',
+  linkTargetCheck: 'warn',
+  linkSuggest: true,
+  linkSuggestLimit: 5,
+  linkSuggestMinScore: 2,
+  sourceEdges: true,
+  wikiLinkEdges: false,
+  graphExpansion: false,
+  graphExpansionLimit: 3,
 };
 
 /** Schemastery configuration for the `wiki` plugin consumer. */
@@ -137,11 +171,41 @@ export const Config = Schema.object({
   nudge: Schema.union([Schema.const('next-step'), Schema.const('turn-end'), Schema.const('off')])
     .default(DEFAULT_CONFIG.nudge)
     .description('Web-access nudge. next-step (default): if a turn called web_search / web_fetch while no wiki tool ran, fold one reminder into the next step input so the model checks the wiki before composing its answer (the turn is not extended). "turn-end" is accepted as a legacy alias for next-step. off: no listeners are registered.'),
+  linkTargetCheck: Schema.union([Schema.const('warn'), Schema.const('strict'), Schema.const('off')])
+    .default(DEFAULT_CONFIG.linkTargetCheck)
+    .description('What a link to a page that does not exist does. warn (default): the write applies and names the dangling edge in the result; strict: the write is refused (ids created earlier in the same batch count as existing); off: silent.'),
+  linkSuggest: Schema.boolean()
+    .default(DEFAULT_CONFIG.linkSuggest)
+    .description('Nominate candidate links for a page being created or updated, using the same scorer wiki_search uses. Suggestions only: the plugin never writes a link nobody asked for.'),
+  linkSuggestLimit: Schema.natural()
+    .default(DEFAULT_CONFIG.linkSuggestLimit)
+    .description('How many candidate links to nominate per touched page.'),
+  linkSuggestMinScore: Schema.number()
+    .min(0)
+    .default(DEFAULT_CONFIG.linkSuggestMinScore)
+    .description('Minimum wiki_search-scale score for a nominated candidate link.'),
+  sourceEdges: Schema.boolean()
+    .default(DEFAULT_CONFIG.sourceEdges)
+    .description('Treat "sources:" refs as provenance edges of the derived graph (powers backlinks from source cards and the unreferenced-source check).'),
+  wikiLinkEdges: Schema.boolean()
+    .default(DEFAULT_CONFIG.wikiLinkEdges)
+    .description('Derive edges from [[page-id]] mentions in bodies. Off by default: it adds edges lint counts, so enabling it changes wiki_lint output on an existing wiki.'),
+  graphExpansion: Schema.boolean()
+    .default(DEFAULT_CONFIG.graphExpansion)
+    .description('Let wiki_search append one-hop graph neighbors of its hits as `related`. Off by default: neighbors are context, never coverage.'),
+  graphExpansionLimit: Schema.natural()
+    .default(DEFAULT_CONFIG.graphExpansionLimit)
+    .description('Cap on graph-expanded neighbors appended to a wiki_search result.'),
 });
 
+/** A hand-edited settings.yaml may name anything; only the two alternatives leave `warn`. */
+function linkTargetCheckOf(config?: Partial<WikiConfig>): LinkTargetCheck {
+  const raw = String(config?.linkTargetCheck ?? DEFAULT_CONFIG.linkTargetCheck);
+  return raw === 'strict' || raw === 'off' ? (raw as LinkTargetCheck) : 'warn';
+}
+
 /** Fill defaults and normalize inter-field constraints. */
-export function resolveConfig(config?: Partial<WikiConfig> | undefined): WikiConfig {
-  const merged: WikiConfig = {
+export function resolveConfig(config?: Partial<WikiConfig> | undefined): WikiConfig {  const merged: WikiConfig = {
     wikiRoot: config?.wikiRoot ?? DEFAULT_CONFIG.wikiRoot,
     searchLimit: config?.searchLimit ?? DEFAULT_CONFIG.searchLimit,
     includeSourcesInSearch: config?.includeSourcesInSearch ?? DEFAULT_CONFIG.includeSourcesInSearch,
@@ -158,12 +222,25 @@ export function resolveConfig(config?: Partial<WikiConfig> | undefined): WikiCon
     // Absent, legacy (`turn-end`) and foreign values all normalize to the one
     // live mode; only an explicit `off` turns the hook off.
     nudge: String(config?.nudge ?? DEFAULT_CONFIG.nudge) === 'off' ? 'off' : 'next-step',
+    linkTargetCheck: linkTargetCheckOf(config),
+    linkSuggest: config?.linkSuggest ?? DEFAULT_CONFIG.linkSuggest,
+    linkSuggestLimit: config?.linkSuggestLimit ?? DEFAULT_CONFIG.linkSuggestLimit,
+    linkSuggestMinScore: config?.linkSuggestMinScore ?? DEFAULT_CONFIG.linkSuggestMinScore,
+    sourceEdges: config?.sourceEdges ?? DEFAULT_CONFIG.sourceEdges,
+    wikiLinkEdges: config?.wikiLinkEdges ?? DEFAULT_CONFIG.wikiLinkEdges,
+    graphExpansion: config?.graphExpansion ?? DEFAULT_CONFIG.graphExpansion,
+    graphExpansionLimit: config?.graphExpansionLimit ?? DEFAULT_CONFIG.graphExpansionLimit,
   };
   // A page cannot be stale before it is aging.
   if (merged.staleAfterDays < merged.agingAfterDays) merged.staleAfterDays = merged.agingAfterDays;
   // A hand-edited settings.yaml must not silently disable the write gate.
   if (merged.approval !== 'staging' && merged.approval !== 'inline' && merged.approval !== 'off') merged.approval = DEFAULT_CONFIG.approval;
   if (merged.maxStagedBytes < 1024) merged.maxStagedBytes = 1024;
+  // Graph feedback stays useful at any corpus size, but never unbounded.
+  if (merged.linkSuggestLimit < 1) merged.linkSuggestLimit = 1;
+  if (merged.linkSuggestLimit > 20) merged.linkSuggestLimit = 20;
+  if (merged.linkSuggestMinScore < 0) merged.linkSuggestMinScore = 0;
+  if (merged.graphExpansionLimit > 20) merged.graphExpansionLimit = 20;
   return merged;
 }
 

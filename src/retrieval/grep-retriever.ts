@@ -1,6 +1,8 @@
 import type { MatchStats, PageKind, SearchHit, WikiPage } from '../types.js';
 import type { WikiStore, ParseFailure } from '../storage/markdown-store.js';
 import { freshnessOf, freshnessWeight } from './freshness.js';
+import type { GraphOptions } from '../graph/graph.js';
+import { KNOWLEDGE_EDGE_KINDS, WikiGraph } from '../graph/graph.js';
 
 /**
  * Phase-1 retriever: tokenized keyword matching over the Markdown corpus
@@ -166,16 +168,87 @@ export interface SearchOptions {
   includeDeprecated: boolean;
   agingAfterDays: number;
   staleAfterDays: number;
+  /**
+   * One-hop graph expansion (see `docs/proposal-graph-maintenance.md`, R7).
+   * Absent means off; the router's coverage verdict is computed from `hits`
+   * only, so a neighbor can never make the wiki look more covered than it is.
+   */
+  expand?: { limit: number; graph: GraphOptions };
+}
+
+/** A page reached through an edge instead of through the query. */
+export interface RelatedHit {
+  id: string;
+  kind: PageKind;
+  title: string;
+  status: WikiPage['status'];
+  /** Relevance to the query; 0 when the neighbor matches nothing of it. */
+  score: number;
+  snippet: string;
+  /** Which hit(s) this page is one edge away from. */
+  via: string[];
+  /** Relation label of the first connecting edge, when labelled. */
+  relation?: string;
 }
 
 export interface SearchResult {
   hits: SearchHit[];
+  /** Graph neighbors of the hits, when expansion was asked for. Never counted as coverage. */
+  related: RelatedHit[];
   scanned: number;
   failures: ParseFailure[];
 }
 
 /** Corpus cache per store instance, invalidated by `store.version`. */
 const corpusCache = new WeakMap<WikiStore, CachedCorpus>();
+
+/** How many hits the expansion walks out from — the frontier, not the corpus. */
+const EXPANSION_FRONTIER = 8;
+
+/**
+ * One-hop neighbors of the hits, ranked by what relevance they have to the
+ * query. Deterministic, and reported separately from the hits precisely because
+ * "connected to an answer" is not "an answer".
+ */
+export function expandNeighbors(pages: readonly WikiPage[], hits: readonly SearchHit[], options: { query: string; qTokens: string[]; limit: number; graph: GraphOptions; agingAfterDays: number; staleAfterDays: number }): RelatedHit[] {
+  if (options.limit <= 0 || hits.length === 0) return [];
+  const graph = WikiGraph.fromPages(pages, options.graph);
+  const direct = new Set(hits.map((hit) => hit.id));
+  const reached = new Map<string, { via: string[]; relation?: string }>();
+  for (const hit of hits.slice(0, EXPANSION_FRONTIER)) {
+    for (const edge of [...graph.outgoing(hit.id, KNOWLEDGE_EDGE_KINDS), ...graph.incoming(hit.id, KNOWLEDGE_EDGE_KINDS)]) {
+      const other = edge.to === hit.id ? edge.from : edge.to;
+      if (direct.has(other)) continue;
+      const seen = reached.get(other);
+      if (seen === undefined) {
+        const entry: { via: string[]; relation?: string } = { via: [hit.id] };
+        if (edge.relation !== undefined) entry.relation = edge.relation;
+        reached.set(other, entry);
+      } else if (!seen.via.includes(hit.id)) {
+        seen.via.push(hit.id);
+      }
+    }
+  }
+  const out: RelatedHit[] = [];
+  for (const [id, reach] of reached) {
+    const page = graph.get(id);
+    if (page === undefined || page.kind === 'source' || page.status !== 'active') continue;
+    const scored = scorePage(page, options.query, options.qTokens, options.agingAfterDays, options.staleAfterDays);
+    const hit: RelatedHit = {
+      id,
+      kind: page.kind,
+      title: page.title,
+      status: page.status,
+      score: scored?.score ?? 0,
+      snippet: scored?.snippet ?? page.body.replace(/\s+/g, ' ').trim().slice(0, 160),
+      via: reach.via.sort(),
+    };
+    if (reach.relation !== undefined) hit.relation = reach.relation;
+    out.push(hit);
+  }
+  out.sort((a, b) => b.score - a.score || b.via.length - a.via.length || a.id.localeCompare(b.id));
+  return out.slice(0, options.limit);
+}
 
 /** Run a ranked search over the wiki. */
 export async function searchWiki(store: WikiStore, options: SearchOptions): Promise<SearchResult> {
@@ -186,7 +259,7 @@ export async function searchWiki(store: WikiStore, options: SearchOptions): Prom
     corpusCache.set(store, cached);
   }
   const qTokens = queryTokens(options.query);
-  if (qTokens.length === 0) return { hits: [], scanned: cached.pages.length, failures: cached.failures };
+  if (qTokens.length === 0) return { hits: [], related: [], scanned: cached.pages.length, failures: cached.failures };
 
   const hits: SearchHit[] = [];
   for (const page of cached.pages) {
@@ -207,5 +280,17 @@ export async function searchWiki(store: WikiStore, options: SearchOptions): Prom
     });
   }
   hits.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
-  return { hits: hits.slice(0, options.limit), scanned: cached.pages.length, failures: cached.failures };
+  const top = hits.slice(0, options.limit);
+  const related =
+    options.expand === undefined
+      ? []
+      : expandNeighbors(cached.pages, top, {
+          query: options.query,
+          qTokens,
+          limit: options.expand.limit,
+          graph: options.expand.graph,
+          agingAfterDays: options.agingAfterDays,
+          staleAfterDays: options.staleAfterDays,
+        });
+  return { hits: top, related, scanned: cached.pages.length, failures: cached.failures };
 }

@@ -58,8 +58,12 @@ export declare class WikiStore {
         pages: WikiPage[];
         failures: ParseFailure[];
     }>;
-    /** Rebuild `index.md` from the current page set. */
-    rebuildIndex(): Promise<void>;
+    /**
+     * Rebuild `index.md` from the current page set. Pass `pages` to reuse a
+     * listing already in hand — the write path reads the corpus once and hands
+     * the same pages to the index and to the derived graph.
+     */
+    rebuildIndex(preread?: readonly WikiPage[]): Promise<void>;
     /** Append entries to today's mutation journal (`logs/YYYY-MM-DD.jsonl`). */
     appendLog(entries: readonly LogEntry[]): Promise<void>;
     /** Recent journal lines, newest last, across the newest files. */

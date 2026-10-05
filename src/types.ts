@@ -180,7 +180,7 @@ export interface LogEntry {
 
 /** One finding from the Wiki Linter. */
 export interface LintIssue {
-  check: 'duplicate' | 'broken-link' | 'stale' | 'orphan' | 'deprecated-ref' | 'oversize';
+  check: 'duplicate' | 'broken-link' | 'stale' | 'orphan' | 'deprecated-ref' | 'oversize' | 'unreferenced-source';
   level: 'info' | 'warn';
   page: string;
   message: string;

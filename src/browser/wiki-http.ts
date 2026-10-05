@@ -4,6 +4,9 @@ import { isValidPageId } from '../storage/id-slug.js';
 import type { StagingQueue, StagedEntry } from '../storage/staging.js';
 import type { WikiStore } from '../storage/markdown-store.js';
 import type { PageKind, WikiPage } from '../types.js';
+import { WikiGraph, graphView, type GraphEdge } from '../graph/graph.js';
+import { graphOptionsOf } from '../validator/checks.js';
+import { suggestNeighbors } from '../graph/suggest.js';
 
 /**
  * Read-only HTTP surface for the wiki browser client plugin
@@ -67,6 +70,12 @@ interface TreePageRow {
   status: string;
   updated: string;
   tags: string[];
+  /** Declared + derived knowledge edges leaving this page. */
+  links: number;
+  /** Edges arriving at this page. 0 means it is unreachable from the rest. */
+  backlinks: number;
+  /** Edges leaving toward a page that does not exist. */
+  dangling: number;
 }
 
 /** One staging row in the tree: pitch line only; the payload needs /wiki/staged. */
@@ -121,11 +130,21 @@ export function createWikiHttpHandlers(store: WikiStore, staging: StagingQueue, 
   const tree = async (req: WikiHttpRequest, res: WikiHttpResponse): Promise<void> => {
     if (!methodGuard(req, res)) return;
     const [{ pages, failures }, staged] = await Promise.all([store.listPages(KINDS), staging.list()]);
+    const graph = WikiGraph.fromPages(pages, graphOptionsOf(config));
     const sections = KINDS.map((kind) => ({
       kind,
       pages: pages
         .filter((page) => page.kind === kind)
-        .map((page): TreePageRow => ({ id: page.id, title: page.title, status: page.status, updated: page.updated, tags: page.tags }))
+        .map((page): TreePageRow => ({
+          id: page.id,
+          title: page.title,
+          status: page.status,
+          updated: page.updated,
+          tags: page.tags,
+          links: graph.knowledgeOutbound(page.id),
+          backlinks: graph.knowledgeInbound(page.id),
+          dangling: graph.danglingOf(page.id).length,
+        }))
         .sort(byTitle),
     }));
     const stagingRows: TreeStagingRow[] = staged.entries.map((entry) => ({
@@ -142,6 +161,9 @@ export function createWikiHttpHandlers(store: WikiStore, staging: StagingQueue, 
       approval: config.approval,
       sections,
       staging: stagingRows,
+      // The graph's shape, so the list can say "this wiki is 3 edges" without
+      // a second round trip. Derived, never stored.
+      graph: graphView(graph),
       // Pages on disk that failed to parse: shown verbatim so the browser
       // stops looking like it "lost" files the linter can still see.
       failures: failures.map((failure) => ({ path: failure.path, message: failure.message })),
@@ -163,7 +185,12 @@ export function createWikiHttpHandlers(store: WikiStore, staging: StagingQueue, 
       sendJson(res, 404, { ok: false, error: 'wiki-http/not-found' });
       return;
     }
-    sendJson(res, 200, { ok: true, ...pagePayload(loaded, config) });
+    // The reader shows where this page sits in the graph, which is a question
+    // about the whole corpus; pages here are hand-curated knowledge, so the
+    // listing is proportionate (and the tree route does the same on every open).
+    const { pages } = await store.listPages(KINDS);
+    const graph = WikiGraph.fromPages(pages, graphOptionsOf(config));
+    sendJson(res, 200, { ok: true, ...pagePayload(loaded, config, graph) });
   };
 
   const staged = async (req: WikiHttpRequest, res: WikiHttpResponse): Promise<void> => {
@@ -185,10 +212,61 @@ export function createWikiHttpHandlers(store: WikiStore, staging: StagingQueue, 
   return { tree, page, staged };
 }
 
+/** One graph edge in wire shape (the reader draws it, never recomputes it). */
+interface EdgeRow {
+  id: string;
+  title: string;
+  kind: string;
+  via: string;
+  relation?: string;
+}
+
 /** Strip a page to wire fields, truncating a body past the inspect cap. */
-function pagePayload(page: WikiPage, config: WikiConfig): Record<string, unknown> {
+function pagePayload(page: WikiPage, config: WikiConfig, graph: WikiGraph): Record<string, unknown> {
   const cap = config.maxInspectBytes;
   const body = Buffer.byteLength(page.body, 'utf8') > cap ? `${page.body.slice(0, cap)}\n\n…` : page.body;
+  const edgeKinds: GraphEdge['kind'][] = graph.options.wikiLinkEdges ? ['link', 'wikilink'] : ['link'];
+
+  const backlinks: EdgeRow[] = [];
+  for (const edge of graph.incoming(page.id, edgeKinds)) {
+    const from = graph.get(edge.from);
+    if (from === undefined || from.id === page.id) continue;
+    if (backlinks.some((row) => row.id === from.id && row.via === edge.kind && (row.relation ?? '') === (edge.relation ?? ''))) continue;
+    const row: EdgeRow = { id: from.id, title: from.title, kind: from.kind, via: edge.kind };
+    if (edge.relation !== undefined) row.relation = edge.relation;
+    backlinks.push(row);
+  }
+  backlinks.sort((a, b) => a.id.localeCompare(b.id));
+
+  const outgoing = page.links.map((link) => {
+    const target = graph.get(link.target);
+    const row: { target: string; title: string; exists: boolean; relation?: string } = {
+      target: link.target,
+      title: target?.title ?? link.target,
+      exists: target !== undefined,
+    };
+    if (link.relation !== undefined) row.relation = link.relation;
+    return row;
+  });
+
+  const dangling = graph.danglingOf(page.id).map((edge) => {
+    const row: { target: string; via: string; relation?: string } = { target: edge.target, via: edge.kind };
+    if (edge.relation !== undefined) row.relation = edge.relation;
+    return row;
+  });
+
+  // Nominations, not facts: the reader shows them apart, and the only way to
+  // make one real is a write the agent or the user decided on.
+  const candidates =
+    config.linkSuggest && page.kind !== 'source'
+      ? suggestNeighbors(graph, { id: page.id, title: page.title, tags: page.tags, body: page.body }, {
+          limit: config.linkSuggestLimit,
+          minScore: config.linkSuggestMinScore,
+          agingAfterDays: config.agingAfterDays,
+          staleAfterDays: config.staleAfterDays,
+        })
+      : [];
+
   return {
     page: {
       id: page.id,
@@ -206,6 +284,14 @@ function pagePayload(page: WikiPage, config: WikiConfig): Record<string, unknown
       ...(page.supersededBy === undefined ? {} : { supersededBy: page.supersededBy }),
       body,
       truncated: body !== page.body,
+      graph: {
+        outgoing,
+        backlinks,
+        dangling,
+        candidates,
+        referenced_by: page.kind === 'source' ? graph.referencedBy(page.id) : [],
+        stats: graphView(graph),
+      },
     },
   };
 }

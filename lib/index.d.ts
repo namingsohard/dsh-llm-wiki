@@ -36,6 +36,14 @@ export declare const Config: import("@deepseek-ai/schemastery").default<Schemast
     approval: import("@deepseek-ai/schemastery").default<"staging" | "inline" | "off", "staging" | "inline" | "off", "defined">;
     maxStagedBytes: import("@deepseek-ai/schemastery").default<number, number, "defined">;
     nudge: import("@deepseek-ai/schemastery").default<"off" | "next-step" | "turn-end", "off" | "next-step" | "turn-end", "defined">;
+    linkTargetCheck: import("@deepseek-ai/schemastery").default<"off" | "warn" | "strict", "off" | "warn" | "strict", "defined">;
+    linkSuggest: import("@deepseek-ai/schemastery").default<boolean, boolean, "defined">;
+    linkSuggestLimit: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    linkSuggestMinScore: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    sourceEdges: import("@deepseek-ai/schemastery").default<boolean, boolean, "defined">;
+    wikiLinkEdges: import("@deepseek-ai/schemastery").default<boolean, boolean, "defined">;
+    graphExpansion: import("@deepseek-ai/schemastery").default<boolean, boolean, "defined">;
+    graphExpansionLimit: import("@deepseek-ai/schemastery").default<number, number, "defined">;
 }>>, Schemastery.ObjectT<NoInfer<{
     wikiRoot: import("@deepseek-ai/schemastery").default<string, string, "defined">;
     searchLimit: import("@deepseek-ai/schemastery").default<number, number, "defined">;
@@ -51,6 +59,14 @@ export declare const Config: import("@deepseek-ai/schemastery").default<Schemast
     approval: import("@deepseek-ai/schemastery").default<"staging" | "inline" | "off", "staging" | "inline" | "off", "defined">;
     maxStagedBytes: import("@deepseek-ai/schemastery").default<number, number, "defined">;
     nudge: import("@deepseek-ai/schemastery").default<"off" | "next-step" | "turn-end", "off" | "next-step" | "turn-end", "defined">;
+    linkTargetCheck: import("@deepseek-ai/schemastery").default<"off" | "warn" | "strict", "off" | "warn" | "strict", "defined">;
+    linkSuggest: import("@deepseek-ai/schemastery").default<boolean, boolean, "defined">;
+    linkSuggestLimit: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    linkSuggestMinScore: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    sourceEdges: import("@deepseek-ai/schemastery").default<boolean, boolean, "defined">;
+    wikiLinkEdges: import("@deepseek-ai/schemastery").default<boolean, boolean, "defined">;
+    graphExpansion: import("@deepseek-ai/schemastery").default<boolean, boolean, "defined">;
+    graphExpansionLimit: import("@deepseek-ai/schemastery").default<number, number, "defined">;
 }>>, "plain">;
 export type Config = WikiConfig;
 export { resolveConfig, resolveWikiRoot } from './config.js';

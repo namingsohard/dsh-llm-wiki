@@ -174,3 +174,84 @@ describe('mutation engine', () => {
     expect(outcome.results[1]?.status).toBe('applied');
   });
 });
+
+describe('write-path graph maintenance', () => {
+  it('warns about a dangling edge instead of hiding it', async () => {
+    const outcome = await mutator.apply([
+      { op: 'create', id: 'kuro', title: 'Kuro LOD cvars', body: 'Distance LOD and FOV.', admission: goodAdmission, links: ['wwmi-mod-workspace | related'] },
+    ]);
+    expect(outcome.applied).toBe(1);
+    expect(outcome.graph.dangling).toEqual([{ page: 'kuro', target: 'wwmi-mod-workspace', kind: 'link', relation: 'related' }]);
+    expect(outcome.graph.notes.join(' ')).toContain('does not exist');
+    expect(outcome.graph.stats.dangling).toBe(1);
+  });
+
+  it('reports the scoped lint findings a later wiki_lint would report', async () => {
+    await mutator.apply([{ op: 'create', id: 'lod', title: 'Context Compaction', body: 'v1', admission: goodAdmission }]);
+    const outcome = await mutator.apply([
+      { op: 'create', id: 'compaction', title: 'Context Compaction', body: 'v2', admission: goodAdmission },
+    ]);
+    expect(outcome.graph.findings.some((issue) => issue.check === 'duplicate' && issue.page === 'compaction')).toBe(true);
+    expect(outcome.graph.findings.some((issue) => issue.check === 'orphan' && issue.page === 'lod')).toBe(false);
+  });
+
+  it('names a page that gained no edge, and nominates the neighbour it could link', async () => {
+    await mutator.apply([
+      { op: 'create', id: 'fov', title: 'FOV compensation', tags: ['rendering'], body: 'FOV changes how far the LOD distance reaches.', admission: goodAdmission },
+    ]);
+    const outcome = await mutator.apply([
+      { op: 'create', id: 'lod', title: 'Character LOD distance', tags: ['rendering'], body: 'Distance LOD thresholds; FOV compensation changes them.', admission: goodAdmission },
+    ]);
+    const candidates = outcome.graph.suggestions.find((entry) => entry.id === 'lod')?.candidates ?? [];
+    expect(candidates.map((candidate) => candidate.id)).toEqual(['fov']);
+    expect(candidates[0]?.shared.length).toBeGreaterThan(0);
+    expect(outcome.graph.notes.join(' ')).toContain('no outgoing edge');
+  });
+
+  it('strict mode refuses the write, and a batch may still create a linked cluster', async () => {
+    const strict = new Mutator(store, resolveConfig({ linkTargetCheck: 'strict' }));
+    const refused = await strict.apply([
+      { op: 'create', id: 'a', title: 'Alpha', body: 'a', admission: goodAdmission, links: ['ghost'] },
+    ]);
+    expect(refused.results[0]?.status).toBe('rejected');
+    expect(refused.results[0]?.detail).toContain('ghost');
+    expect(await store.read('a')).toBeUndefined();
+
+    const cluster = await strict.apply([
+      { op: 'create', id: 'a', title: 'Alpha', body: 'a', admission: goodAdmission, links: ['b'] },
+      { op: 'create', id: 'b', title: 'Beta', body: 'b', admission: goodAdmission, links: ['a | depends on'] },
+    ]);
+    expect(cluster.applied).toBe(2);
+    expect(cluster.graph.dangling).toHaveLength(0);
+  });
+
+  it('strict mode also refuses an UPDATE that would add a dangling edge', async () => {
+    const strict = new Mutator(store, resolveConfig({ linkTargetCheck: 'strict' }));
+    await strict.apply([{ op: 'create', id: 'a', title: 'Alpha', body: 'a', admission: goodAdmission }]);
+    const outcome = await strict.apply([{ op: 'update', id: 'a', links: ['ghost'] }]);
+    expect(outcome.results[0]?.status).toBe('rejected');
+    expect((await store.read('a'))?.links).toEqual([]);
+  });
+
+  it('off mode says nothing at all', async () => {
+    const quiet = new Mutator(store, resolveConfig({ linkTargetCheck: 'off', linkSuggest: false }));
+    const outcome = await quiet.apply([
+      { op: 'create', id: 'kuro', title: 'Kuro LOD cvars', body: 'Distance LOD.', admission: goodAdmission, links: ['ghost'] },
+    ]);
+    expect(outcome.applied).toBe(1);
+    expect(outcome.graph.dangling).toHaveLength(0);
+    expect(outcome.graph.suggestions).toHaveLength(0);
+  });
+
+  it('previewGraph reports the same shape without touching the wiki', async () => {
+    await mutator.apply([{ op: 'create', id: 'fov', title: 'FOV compensation', tags: ['rendering'], body: 'FOV and LOD distance.', admission: goodAdmission }]);
+    const preview = await mutator.previewGraph([
+      { op: 'create', id: 'lod', title: 'Character LOD distance', tags: ['rendering'], body: 'Distance LOD and FOV compensation.', admission: goodAdmission, links: ['ghost'] },
+    ]);
+    expect(preview.preview).toBe(true);
+    expect(preview.dangling.map((edge) => edge.target)).toEqual(['ghost']);
+    expect(preview.suggestions.find((entry) => entry.id === 'lod')?.candidates.map((row) => row.id)).toEqual(['fov']);
+    expect(preview.notes.join(' ')).toContain('does not exist');
+    expect(await store.read('lod')).toBeUndefined();
+  });
+});
